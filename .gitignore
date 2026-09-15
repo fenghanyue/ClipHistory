@@ -1,0 +1,16 @@
+# SwiftPM 编译缓存（swift.sh 的工具链绕过文件也放在这里面）
+.build/
+
+# assemble_app.sh 组装的 ClipHistory.app、make_dmg.sh 的打包暂存目录、
+# make_icon.sh 的 iconset 和中间图
+build/
+
+# make_dmg.sh 产出的 DMG
+dist/
+
+# Xcode / SwiftPM 打开项目时生成的个人配置
+.swiftpm/
+*.xcuserdatad
+
+# 访达生成的目录元数据
+.DS_Store
