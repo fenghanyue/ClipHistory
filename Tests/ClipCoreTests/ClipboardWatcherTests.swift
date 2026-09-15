@@ -106,6 +106,20 @@ final class ClipboardWatcherTests {
         #expect(item.sourceName == "某 App")
     }
 
+    @Test("带网页格式的复制：文本和格式副本一起落库")
+    func recordsRichPayload() throws {
+        let watcher = makeWatcher(frontmost: SourceApp(bundleID: "com.electron.lark", name: "飞书"))
+        let html = Data("<table><tr><td>A1</td></tr></table>".utf8)
+        pasteboard.copy(text: "A1\tB1", ["public.html": html])
+        watcher.poll()
+        watcher.waitUntilIdle()
+
+        let item = try #require(try store.recent().first)
+        #expect(item.text == "A1\tB1")
+        #expect(item.hasRich)
+        #expect(try store.richPayload(id: item.id) == makeRichPayload([("public.html", html)]))
+    }
+
     @Test("读取过程中剪贴板又变了：本轮丢弃，下一轮只记最新内容")
     func changeDuringRead() throws {
         let watcher = makeWatcher()

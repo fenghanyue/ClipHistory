@@ -19,12 +19,16 @@ public enum PasteboardType {
 /// 剪贴板第一个条目的快照：类型列表读取时就确定，数据按需读取
 ///（Excel 复制一次就有十几种格式，只读用得到的那一两种）
 public struct PasteboardItemSnapshot {
-    public let types: Set<String>
+    /// 剪贴板上的类型，保持原始顺序：这是写入方给出的优先级，格式副本按同样顺序写回
+    public let types: [String]
+    /// 同样的类型，判断"有没有某个格式"时用
+    public let typeSet: Set<String>
     private let stringLoader: (String) -> String?
     private let dataLoader: (String) -> Data?
 
-    public init(types: Set<String>, string: @escaping (String) -> String?, data: @escaping (String) -> Data?) {
+    public init(types: [String], string: @escaping (String) -> String?, data: @escaping (String) -> Data?) {
         self.types = types
+        self.typeSet = Set(types)
         self.stringLoader = string
         self.dataLoader = data
     }
@@ -66,7 +70,7 @@ public final class SystemPasteboard: PasteboardSource {
     public func readFirstItem() -> PasteboardItemSnapshot? {
         guard let item = pasteboard.pasteboardItems?.first else { return nil }
         return PasteboardItemSnapshot(
-            types: Set(item.types.map(\.rawValue)),
+            types: item.types.map(\.rawValue),
             string: { item.string(forType: NSPasteboard.PasteboardType($0)) },
             data: { item.data(forType: NSPasteboard.PasteboardType($0)) }
         )

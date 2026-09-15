@@ -16,7 +16,8 @@ final class HistoryModel: ObservableObject {
     @Published private(set) var isPaused = false
     @Published var selectedIndex = 0
 
-    var onPick: ((ClipItem) -> Void)?
+    /// 选中一条要输入：第二个参数为 true 表示只粘纯文字（⇧ 点击 / ⇧Enter）
+    var onPick: ((ClipItem, Bool) -> Void)?
     var onOpenAccessibilitySettings: (() -> Void)?
     /// 切换暂停 / 恢复记录，返回切换后是否处于暂停
     var onTogglePause: (() -> Bool)?
@@ -71,13 +72,13 @@ final class HistoryModel: ObservableObject {
         }
     }
 
-    func pickSelected() {
-        pick(at: selectedIndex)
+    func pickSelected(plainOnly: Bool = false) {
+        pick(at: selectedIndex, plainOnly: plainOnly)
     }
 
-    func pick(at index: Int) {
+    func pick(at index: Int, plainOnly: Bool = false) {
         guard items.indices.contains(index) else { return }
-        onPick?(items[index])
+        onPick?(items[index], plainOnly)
     }
 
     func togglePin(_ item: ClipItem) {
@@ -336,7 +337,8 @@ struct HistoryRow: View {
             if hovering { model.hover(index: index) }
         }
         .onTapGesture {
-            model.pick(at: index)
+            // SwiftUI 的 TapGesture().modifiers(.shift) 在 macOS 上不够稳，直接读当前修饰键状态
+            model.pick(at: index, plainOnly: NSEvent.modifierFlags.contains(.shift))
         }
     }
 
@@ -393,6 +395,11 @@ struct PreviewFooter: View {
                 }
             }
             Spacer(minLength: 0)
+            if item.hasRich {
+                Text("⇧ 点击条目 = 只粘纯文字")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
             SourceLine(model: model, item: item, text: details)
         }
         .padding(.horizontal, 14)
@@ -417,7 +424,7 @@ struct PreviewFooter: View {
     }
 }
 
-/// 来源 App 图标 + 名称 + 附加文字
+/// 来源 App 图标 + 名称 + 附加文字；带格式副本的条目额外显示一个"含格式"小标记
 struct SourceLine: View {
     let model: HistoryModel
     let item: ClipItem
@@ -434,6 +441,12 @@ struct SourceLine: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+            if item.hasRich {
+                Image(systemName: "textformat")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .help("含格式：粘贴时会保留表格 / 样式；⇧ 点击只粘纯文字")
+            }
         }
     }
 }

@@ -12,13 +12,23 @@ final class ClipStoreTests {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    func makeStore(maxItems: Int = 1000, maxImageBytes: Int = .max) throws -> ClipStore {
+    func makeStore(maxItems: Int = 1000, maxImageBytes: Int = .max, maxRichBytes: Int = .max) throws -> ClipStore {
         try ClipStore(
             directory: directory,
-            retention: RetentionLimits(maxUnpinnedItems: maxItems, maxUnpinnedImageBytes: maxImageBytes),
+            retention: RetentionLimits(
+                maxUnpinnedItems: maxItems,
+                maxUnpinnedImageBytes: maxImageBytes,
+                maxUnpinnedRichBytes: maxRichBytes
+            ),
             now: clock.now
         )
     }
+
+    let htmlTable = makeRichPayload([("public.html", Data("<table><tr><td>A1</td></tr></table>".utf8))])
+    let htmlAndCustom = makeRichPayload([
+        ("public.html", Data("<table><tr><td>改过了</td></tr></table>".utf8)),
+        ("org.chromium.web-custom-data", Data(repeating: 7, count: 32)),
+    ])
 
     func fileExists(_ url: URL) -> Bool {
         FileManager.default.fileExists(atPath: url.path)
@@ -182,6 +192,131 @@ final class ClipStoreTests {
         #expect(try store.clearUnpinned() == 2)
         #expect(try store.recent().map(\.text) == ["收藏"])
         #expect(store.images.storedFiles().isEmpty)
+    }
+
+    // MARK: - 格式副本（富文本）
+
+    @Test("带格式副本的文本：记录标记为含格式，副本文件落盘，内容能原样读回")
+    func recordsRichPayload() throws {
+        let store = try makeStore()
+        let id = try #require(try store.recordText("A1", rich: htmlTable, source: feishu).insertedID)
+        let item = try #require(try store.item(id: id))
+
+        #expect(item.hasRich)
+        #expect(item.richByteSize > 0)
+        #expect(fileExists(store.payloads.payloadURL(hash: item.contentHash)))
+        #expect(try store.richPayload(id: id) == htmlTable)
+    }
+
+    @Test("去重不受格式影响：同一段文字带格式和不带格式仍然是一条")
+    func richDoesNotAffectDedupe() throws {
+        let store = try makeStore()
+        let id = try #require(try store.recordText("A1", rich: htmlTable, source: feishu).insertedID)
+        #expect(try store.recordText("A1", source: nil) == .bumped(id: id))
+        #expect(try store.counts().total == 1)
+    }
+
+    @Test("再复制一次：格式副本被新的覆盖")
+    func richReplacedOnBump() throws {
+        let store = try makeStore()
+        let id = try #require(try store.recordText("A1", rich: htmlTable, source: feishu).insertedID)
+        try store.recordText("A1", rich: htmlAndCustom, source: feishu)
+        #expect(try store.richPayload(id: id) == htmlAndCustom)
+    }
+
+    @Test("再复制一次但这次没有格式：旧的格式副本被清掉，文件也删掉")
+    func richClearedOnPlainBump() throws {
+        let store = try makeStore()
+        let id = try #require(try store.recordText("A1", rich: htmlTable, source: feishu).insertedID)
+        let hash = try #require(try store.item(id: id)).contentHash
+
+        try store.recordText("A1", source: nil)
+
+        #expect(try store.item(id: id)?.hasRich == false)
+        #expect(try store.richPayload(id: id) == nil)
+        #expect(!fileExists(store.payloads.payloadURL(hash: hash)))
+    }
+
+    @Test("图片也能带格式副本（飞书表格里的图文单元格）")
+    func recordsRichOnImage() throws {
+        let store = try makeStore()
+        let id = try #require(try store.recordImage(makeImageData(.png), format: .png, width: 4, height: 3,
+                                                    rich: htmlTable, source: feishu).insertedID)
+        #expect(try store.item(id: id)?.hasRich == true)
+        #expect(try store.richPayload(id: id) == htmlTable)
+    }
+
+    @Test("删除和清空历史都会连带删掉格式副本文件")
+    func deleteRemovesRichFile() throws {
+        let store = try makeStore()
+        let id = try #require(try store.recordText("删我", rich: htmlTable, source: nil).insertedID)
+        let hash = try #require(try store.item(id: id)).contentHash
+        #expect(try store.delete(id: id) == true)
+        #expect(!fileExists(store.payloads.payloadURL(hash: hash)))
+
+        try store.recordText("再来一条", rich: htmlTable, source: nil)
+        #expect(try store.clearUnpinned() == 1)
+        #expect(store.payloads.storedFiles().isEmpty)
+    }
+
+    @Test("格式副本超出总预算：只丢最旧的格式副本，记录本身保留")
+    func richBudgetDropsPayloadsNotRows() throws {
+        let sizing = try makeStore()
+        let first = try #require(try sizing.recordText("旧", rich: htmlTable, source: nil).insertedID)
+        let payloadBytes = try #require(try sizing.item(id: first)).richByteSize
+
+        // 预算刚好够放一条：最新那条留住，更旧的只丢格式副本，记录和文字都还在
+        let store = try makeStore(maxRichBytes: payloadBytes)
+        let second = try #require(try store.recordText("新", rich: htmlTable, source: nil).insertedID)
+
+        #expect(try store.item(id: first)?.hasRich == false)
+        #expect(try store.item(id: second)?.hasRich == true)
+        #expect(try store.recent().map(\.text) == ["新", "旧"])
+    }
+
+    @Test("一致性校验：格式副本文件丢了只清引用不删记录，孤儿副本文件删掉")
+    func consistencyKeepsRowWhenRichFileMissing() throws {
+        let store = try makeStore()
+        let id = try #require(try store.recordText("文字还在", rich: htmlTable, source: nil).insertedID)
+        let hash = try #require(try store.item(id: id)).contentHash
+        try FileManager.default.removeItem(at: store.payloads.payloadURL(hash: hash))
+        let orphan = store.payloads.directory.appendingPathComponent("deadbeef.plist")
+        try Data([1, 2, 3]).write(to: orphan)
+
+        let report = try store.verifyConsistency()
+
+        #expect(report.clearedMissingRich == 1)
+        #expect(report.removedOrphanFiles == 1)
+        #expect(try store.item(id: id)?.text == "文字还在")
+        #expect(try store.item(id: id)?.hasRich == false)
+        #expect(!fileExists(orphan))
+    }
+
+    @Test("老版本数据库：打开时自动补上格式副本的列，老数据完好")
+    func migratesOldDatabase() throws {
+        do {
+            let old = try SQLiteDB(path: directory.appendingPathComponent("clips.sqlite").path)
+            try old.execute("""
+                CREATE TABLE clips (
+                  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT, image_file TEXT,
+                  image_w INTEGER, image_h INTEGER, preview TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE,
+                  byte_size INTEGER NOT NULL, source_bundle_id TEXT, source_name TEXT,
+                  created_at REAL NOT NULL, last_copied_at REAL NOT NULL,
+                  copy_count INTEGER NOT NULL DEFAULT 1, pinned_at REAL
+                );
+                INSERT INTO clips (kind, text, preview, content_hash, byte_size, created_at, last_copied_at)
+                VALUES ('text', '老数据', '老数据', 'oldhash', 9, 1, 1);
+                """)
+        }
+
+        let store = try makeStore()
+        let item = try #require(try store.recent().first)
+        #expect(item.text == "老数据")
+        #expect(item.hasRich == false)
+
+        // 补上的列能正常写入
+        let id = try #require(try store.recordText("新数据", rich: htmlTable, source: nil).insertedID)
+        #expect(try store.richPayload(id: id) == htmlTable)
     }
 
     // MARK: - 读取与持久化

@@ -5,12 +5,35 @@ public enum ImageFormat: String, Equatable {
     case tiff
 }
 
+/// 一次复制里采集到的格式副本（富文本）
+public enum RichCapture: Equatable, CustomStringConvertible {
+    /// 剪贴板上没有白名单里的格式
+    case none
+    case payload(RichPayload)
+    /// 格式副本超过上限，整份丢弃，只记文字 / 图片；bytes 是读到越界时的累计值
+    case droppedTooLarge(bytes: Int)
+
+    /// 真正要存下来的那份；没有则为 nil
+    public var payload: RichPayload? {
+        if case .payload(let payload) = self { return payload }
+        return nil
+    }
+
+    public var description: String {
+        switch self {
+        case .none: return "无"
+        case .payload(let payload): return "\(payload.typeSummary)（\(payload.byteSize) 字节）"
+        case .droppedTooLarge(let bytes): return "超上限（已读 \(bytes) 字节），已丢弃"
+        }
+    }
+}
+
 /// 过滤规则的判定结果
 public enum CaptureDecision: Equatable {
-    /// 记为文本：原文，不做任何修改
-    case text(String)
-    /// 记为图片：剪贴板里的原始数据、格式和像素尺寸
-    case image(Data, format: ImageFormat, width: Int, height: Int)
+    /// 记为文本：原文，不做任何修改；rich 是同一次复制里附带的格式副本
+    case text(String, rich: RichCapture)
+    /// 记为图片：剪贴板里的原始数据、格式和像素尺寸；rich 同上
+    case image(Data, format: ImageFormat, width: Int, height: Int, rich: RichCapture)
     /// 跳过，附原因
     case skip(SkipReason)
 }
@@ -30,10 +53,16 @@ public enum SkipReason: String, Equatable {
 public struct CaptureLimits: Equatable {
     public var maxTextBytes: Int
     public var maxImageBytes: Int
+    public var maxRichBytes: Int
 
-    public init(maxTextBytes: Int = Config.maxTextBytes, maxImageBytes: Int = Config.maxImageBytes) {
+    public init(
+        maxTextBytes: Int = Config.maxTextBytes,
+        maxImageBytes: Int = Config.maxImageBytes,
+        maxRichBytes: Int = Config.maxRichBytes
+    ) {
         self.maxTextBytes = maxTextBytes
         self.maxImageBytes = maxImageBytes
+        self.maxRichBytes = maxRichBytes
     }
 }
 
@@ -45,7 +74,7 @@ public enum CaptureFilter {
         source: SourceApp?,
         limits: CaptureLimits = CaptureLimits()
     ) -> CaptureDecision {
-        let types = item.types
+        let types = item.typeSet
         let hasImage = types.contains(PasteboardType.png) || types.contains(PasteboardType.tiff)
 
         // 规则 3：本 App 写回剪贴板时带的来源标记 → 跳过（选中输入时已经更新过这条的时间）
@@ -72,7 +101,8 @@ public enum CaptureFilter {
             return hasImage ? decideImage(item: item, limits: limits) : .skip(.fileCopy)
         }
 
-        // 规则 7：有非空白文本 → 记文本。即使同时带图片也只记文本（Excel/飞书表格复制单元格会附带渲染图）
+        // 规则 7：有非空白文本 → 记文本。即使同时带图片也只记文本（Excel/飞书表格复制单元格会附带渲染图），
+        // 但同一次复制里的 HTML 等格式表示会作为"格式副本"一起存下来，粘贴时原样写回
         let text = item.plainText
         if let text, text.contains(where: { !$0.isWhitespace }) {
             // 超过上限整条不记，不截断：截断后输入回去的就是错的内容
@@ -80,7 +110,7 @@ public enum CaptureFilter {
                 return .skip(.textTooLarge)
             }
             // 保存原文，不 trim、不改换行
-            return .text(text)
+            return .text(text, rich: collectRich(item: item, limits: limits))
         }
 
         // 规则 8：没有有效文本，但有图片
@@ -97,9 +127,10 @@ public enum CaptureFilter {
         return .skip(.unsupported)
     }
 
-    /// 规则 8 的检查：优先 PNG（已压缩），其次 TIFF；超过上限或解码失败都跳过
+    /// 规则 8 的检查：优先 PNG（已压缩），其次 TIFF；超过上限或解码失败都跳过。
+    /// 这里也带上格式副本：飞书表格里全是图片单元格时纯文本为空，会走到这个分支，而 HTML 恰恰在那时最关键
     private static func decideImage(item: PasteboardItemSnapshot, limits: CaptureLimits) -> CaptureDecision {
-        let format: ImageFormat = item.types.contains(PasteboardType.png) ? .png : .tiff
+        let format: ImageFormat = item.typeSet.contains(PasteboardType.png) ? .png : .tiff
         let type = format == .png ? PasteboardType.png : PasteboardType.tiff
         guard let data = item.data(forType: type), !data.isEmpty else {
             return .skip(.imageUndecodable)
@@ -110,6 +141,27 @@ public enum CaptureFilter {
         guard let size = ImageStore.pixelSize(of: data), size.width > 0, size.height > 0 else {
             return .skip(.imageUndecodable)
         }
-        return .image(data, format: format, width: size.width, height: size.height)
+        return .image(data, format: format, width: size.width, height: size.height,
+                      rich: collectRich(item: item, limits: limits))
+    }
+
+    /// 按剪贴板上的原始顺序收集白名单里的格式表示。
+    /// 附属格式（来源网址）只在同时存在主格式时才带上，否则 Chrome 复制一张图也会被标成"含格式"。
+    /// 总字节数越界就整份丢弃：只留半份格式，反而可能让粘贴方挑中残缺的那一份
+    private static func collectRich(item: PasteboardItemSnapshot, limits: CaptureLimits) -> RichCapture {
+        guard !item.typeSet.isDisjoint(with: Config.richPasteboardTypes) else { return .none }
+
+        let wanted = Config.richPasteboardTypes.union(Config.richCompanionTypes)
+        var representations: [RichRepresentation] = []
+        var total = 0
+        for type in item.types where wanted.contains(type) {
+            guard let data = item.data(forType: type), !data.isEmpty else { continue }
+            total += data.count
+            if total > limits.maxRichBytes {
+                return .droppedTooLarge(bytes: total)
+            }
+            representations.append(RichRepresentation(uti: type, data: data))
+        }
+        return representations.isEmpty ? .none : .payload(RichPayload(representations: representations))
     }
 }

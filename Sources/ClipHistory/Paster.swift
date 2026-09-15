@@ -28,10 +28,20 @@ enum Paster {
     }
 
     /// 把一条历史记录写回剪贴板，并附带本 App 的来源标记。
-    /// 图片同时提供 PNG 和 TIFF：部分 App 只认 TIFF，但 TIFF 体积大，等对方真正要时才生成
+    /// 图片同时提供 PNG 和 TIFF：部分 App 只认 TIFF，但 TIFF 体积大，等对方真正要时才生成。
+    ///
+    /// rich 是复制当时一起存下来的格式副本（HTML/RTF 等），原样写回去，
+    /// 粘贴方（飞书文档、微信）自己挑认识的那一份，只认纯文本的目标（终端、编辑器）会自动降级。
+    /// plainOnly = true 时完全不写格式副本，等于本 App 一直以来的行为，也是出问题时的兜底
     @discardableResult
-    static func write(item: ClipItem, images: ImageStore) -> Bool {
+    static func write(item: ClipItem, images: ImageStore, rich: RichPayload?, plainOnly: Bool) -> Bool {
         let pasteboardItem = NSPasteboardItem()
+        // 格式副本排在前面：少数 App 会遍历类型列表取第一个认识的，多数 App 按自己的优先级挑，与顺序无关
+        if !plainOnly, let rich {
+            for representation in rich.representations {
+                pasteboardItem.setData(representation.data, forType: NSPasteboard.PasteboardType(representation.uti))
+            }
+        }
         switch item.kind {
         case .text:
             guard let text = item.text else { return false }

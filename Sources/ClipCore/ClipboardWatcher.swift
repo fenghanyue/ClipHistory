@@ -81,17 +81,17 @@ public final class ClipboardWatcher {
         lastChangeCount = changeCount
 
         let sourceDesc = source.map { "\($0.name ?? "?")(\($0.bundleID ?? "-"))" } ?? "未知"
-        let header = "剪贴板变化 #\(changeCount)  来源=\(sourceDesc)  类型=[\(item.types.sorted().joined(separator: ", "))]"
+        let header = "剪贴板变化 #\(changeCount)  来源=\(sourceDesc)  类型=[\(item.types.joined(separator: ", "))]"
         switch decision {
         case .skip(let reason):
             log("\(header)\n  → 跳过：\(reason.rawValue)")
-        case .text(let text):
-            record("\(header)\n  → 记为文本 \(text.utf8.count) 字节") {
-                try $0.recordText(text, source: source)
+        case .text(let text, let rich):
+            record("\(header)\n  → 记为文本 \(text.utf8.count) 字节，格式副本=\(rich)") {
+                try $0.recordText(text, rich: rich.payload, source: source)
             }
-        case .image(let data, let format, let width, let height):
-            record("\(header)\n  → 记为图片 \(width)×\(height) \(format.rawValue) \(data.count) 字节") {
-                try $0.recordImage(data, format: format, width: width, height: height, source: source)
+        case .image(let data, let format, let width, let height, let rich):
+            record("\(header)\n  → 记为图片 \(width)×\(height) \(format.rawValue) \(data.count) 字节，格式副本=\(rich)") {
+                try $0.recordImage(data, format: format, width: width, height: height, rich: rich.payload, source: source)
             }
         }
     }

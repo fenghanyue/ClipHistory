@@ -4,23 +4,35 @@ import ImageIO
 import UniformTypeIdentifiers
 @testable import ClipCore
 
-/// 按类型构造剪贴板快照；text 非 nil 时自动带上纯文本类型
+/// 按类型构造剪贴板快照；text 非 nil 时自动带上纯文本类型。
+/// 字典没有顺序，这里按类型名排序，保证结果稳定；类型顺序有意义时用下面的 ordered 版本
 func makeSnapshot(_ entries: [String: Data] = [:], text: String? = nil) -> PasteboardItemSnapshot {
-    var types = Set(entries.keys)
-    if text != nil {
-        types.insert(PasteboardType.plainText)
+    makeSnapshot(ordered: entries.keys.sorted().map { ($0, entries[$0]!) }, text: text)
+}
+
+/// 类型顺序有意义时用这个：格式副本按剪贴板上的原始顺序保存
+func makeSnapshot(ordered entries: [(String, Data)], text: String? = nil) -> PasteboardItemSnapshot {
+    var types = entries.map(\.0)
+    if text != nil, !types.contains(PasteboardType.plainText) {
+        types.append(PasteboardType.plainText)
     }
+    let lookup = Dictionary(entries, uniquingKeysWith: { _, last in last })
     return PasteboardItemSnapshot(
         types: types,
         string: { type in
             if type == PasteboardType.plainText { return text }
-            return entries[type].flatMap { String(data: $0, encoding: .utf8) }
+            return lookup[type].flatMap { String(data: $0, encoding: .utf8) }
         },
         data: { type in
             if type == PasteboardType.plainText { return text.map { Data($0.utf8) } }
-            return entries[type]
+            return lookup[type]
         }
     )
+}
+
+/// 测试用的格式副本
+func makeRichPayload(_ entries: [(String, Data)]) -> RichPayload {
+    RichPayload(representations: entries.map { RichRepresentation(uti: $0.0, data: $0.1) })
 }
 
 /// 生成一张纯色小图片；seed 不同颜色不同（内容哈希也不同）

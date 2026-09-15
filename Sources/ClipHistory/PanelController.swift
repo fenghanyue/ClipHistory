@@ -62,8 +62,8 @@ final class PanelController: NSObject, NSWindowDelegate {
         background.addSubview(hostingView)
         panel.contentView = background
 
-        model.onPick = { [weak self] item in
-            self?.pick(item)
+        model.onPick = { [weak self] item, plainOnly in
+            self?.pick(item, plainOnly: plainOnly)
         }
         model.onOpenAccessibilitySettings = { [weak self] in
             self?.close()
@@ -137,7 +137,8 @@ final class PanelController: NSObject, NSWindowDelegate {
         case kVK_RightArrow:
             model.switchTab(.pinned)
         case kVK_Return, kVK_ANSI_KeypadEnter:
-            model.pickSelected()
+            // ⇧Enter 和 ⇧点击一样：只粘纯文字
+            model.pickSelected(plainOnly: event.modifierFlags.contains(.shift))
         default:
             // 其他按键（包括数字键）不做任何操作
             break
@@ -146,7 +147,7 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     // MARK: - 选中后自动输入
 
-    private func pick(_ listedItem: ClipItem) {
+    private func pick(_ listedItem: ClipItem, plainOnly: Bool) {
         // 按 id 重新读取完整记录：列表里的数据可能已经过时（比如刚被清理）
         guard let item = try? store.item(id: listedItem.id) else {
             NSSound.beep()
@@ -155,7 +156,9 @@ final class PanelController: NSObject, NSWindowDelegate {
         let target = targetApp
         close()
 
-        guard Paster.write(item: item, images: store.images) else {
+        // ⇧ 点击（或 ⇧Enter）只粘纯文字，连格式副本都不读
+        let rich: RichPayload? = plainOnly ? nil : (try? store.richPayload(id: item.id))
+        guard Paster.write(item: item, images: store.images, rich: rich, plainOnly: plainOnly) else {
             NSSound.beep()
             DebugLog.write("选中输入失败：条目 #\(item.id) 无法写入剪贴板（图片文件可能丢失）")
             return
@@ -181,7 +184,8 @@ final class PanelController: NSObject, NSWindowDelegate {
                 }
             }
         }
-        DebugLog.write("选中条目 #\(item.id)（\(item.kind.rawValue)），输入到 \(target?.localizedName ?? "未知")")
+        let mode = plainOnly ? "纯文本模式" : "含格式 \(rich?.representations.count ?? 0) 项"
+        DebugLog.write("选中条目 #\(item.id)（\(item.kind.rawValue)，\(mode)），输入到 \(target?.localizedName ?? "未知")")
     }
 
     // MARK: - 外观
