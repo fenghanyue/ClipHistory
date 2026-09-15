@@ -16,8 +16,7 @@ final class HistoryModel: ObservableObject {
     @Published private(set) var isPaused = false
     @Published var selectedIndex = 0
 
-    /// 选中一条要输入：第二个参数为 true 表示只粘纯文字（⇧ 点击 / ⇧Enter）
-    var onPick: ((ClipItem, Bool) -> Void)?
+    var onPick: ((ClipItem) -> Void)?
     var onOpenAccessibilitySettings: (() -> Void)?
     /// 切换暂停 / 恢复记录，返回切换后是否处于暂停
     var onTogglePause: (() -> Bool)?
@@ -72,13 +71,13 @@ final class HistoryModel: ObservableObject {
         }
     }
 
-    func pickSelected(plainOnly: Bool = false) {
-        pick(at: selectedIndex, plainOnly: plainOnly)
+    func pickSelected() {
+        pick(at: selectedIndex)
     }
 
-    func pick(at index: Int, plainOnly: Bool = false) {
+    func pick(at index: Int) {
         guard items.indices.contains(index) else { return }
-        onPick?(items[index], plainOnly)
+        onPick?(items[index])
     }
 
     func togglePin(_ item: ClipItem) {
@@ -337,8 +336,7 @@ struct HistoryRow: View {
             if hovering { model.hover(index: index) }
         }
         .onTapGesture {
-            // SwiftUI 的 TapGesture().modifiers(.shift) 在 macOS 上不够稳，直接读当前修饰键状态
-            model.pick(at: index, plainOnly: NSEvent.modifierFlags.contains(.shift))
+            model.pick(at: index)
         }
     }
 
@@ -393,13 +391,13 @@ struct PreviewFooter: View {
                 if let thumbnail = model.thumbnail(for: item) {
                     ImageThumbnail(image: thumbnail, item: item, maxSize: CGSize(width: 360, height: 64))
                 }
+            case .rich:
+                // 正文是 HTML 等格式数据，没有可读的纯文字，也不渲染 HTML（会去下载远程图片）
+                Text(item.preview)
+                    .font(.system(size: 12))
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             Spacer(minLength: 0)
-            if item.hasRich {
-                Text("⇧ 点击条目 = 只粘纯文字")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-            }
             SourceLine(model: model, item: item, text: details)
         }
         .padding(.horizontal, 14)
@@ -412,6 +410,7 @@ struct PreviewFooter: View {
         switch item.kind {
         case .text: parts.append("共 \((item.text ?? "").count) 字")
         case .image: parts.append(item.preview)
+        case .rich: parts.append("\(item.richByteSize / 1024) KB 格式数据")
         }
         parts.append("复制 \(item.copyCount) 次")
         parts.append("首次 \(TimeText.describe(item.createdAt))")
@@ -445,7 +444,7 @@ struct SourceLine: View {
                 Image(systemName: "textformat")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
-                    .help("含格式：粘贴时会保留表格 / 样式；⇧ 点击只粘纯文字")
+                    .help("含格式：粘贴时会保留表格 / 图片 / 样式")
             }
         }
     }

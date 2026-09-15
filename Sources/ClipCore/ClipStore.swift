@@ -4,6 +4,9 @@ import Foundation
 public enum ClipKind: String, Equatable {
     case text
     case image
+    /// 正文就是格式副本本身：剪贴板上既没有可用文字也没有图片数据，
+    /// 内容全在 HTML 等格式表示里（飞书表格里纯图片的单元格就是这样）
+    case rich
 }
 
 /// 一条剪贴板历史（对应 clips 表的一行）
@@ -63,10 +66,12 @@ public struct ConsistencyReport: Equatable, CustomStringConvertible {
     public var removedOrphanFiles = 0
     public var regeneratedThumbnails = 0
     public var clearedMissingRich = 0
+    public var removedRowsMissingRich = 0
 
     public var description: String {
-        "删除缺图记录 \(removedRowsMissingImage) 条，删除孤儿文件 \(removedOrphanFiles) 个，"
-            + "重建缩略图 \(regeneratedThumbnails) 个，清理失效格式副本 \(clearedMissingRich) 条"
+        "删除缺图记录 \(removedRowsMissingImage) 条，删除缺格式副本记录 \(removedRowsMissingRich) 条，"
+            + "删除孤儿文件 \(removedOrphanFiles) 个，重建缩略图 \(regeneratedThumbnails) 个，"
+            + "清理失效格式副本 \(clearedMissingRich) 条"
     }
 }
 
@@ -88,11 +93,12 @@ public final class ClipStore {
         self.retention = retention
         self.now = now
         try db.execute(Self.schema)
-        try migrateColumns()
+        try migrate()
     }
 
-    /// 给老版本的数据库补上后加的列。按列名检查，天然幂等，不需要版本号
-    private func migrateColumns() throws {
+    /// 老版本数据库的迁移。两步都按当前表的实际状态判断，天然幂等，不需要版本号
+    private func migrate() throws {
+        // 第一步：补上后加的两列
         let existing = Set(try db.query("PRAGMA table_info(clips)") { $0.text(1) ?? "" })
         if !existing.contains("rich_file") {
             try db.run("ALTER TABLE clips ADD COLUMN rich_file TEXT")
@@ -100,19 +106,43 @@ public final class ClipStore {
         if !existing.contains("rich_size") {
             try db.run("ALTER TABLE clips ADD COLUMN rich_size INTEGER NOT NULL DEFAULT 0")
         }
+
+        // 第二步：老表的 CHECK 约束只认 text / image，放不下 rich 记录。
+        // SQLite 不能原地改 CHECK，只能新建表 → 复制数据 → 换名
+        let currentSQL = try db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'clips'") {
+            $0.text(0) ?? ""
+        }.first ?? ""
+        guard !currentSQL.contains("'rich'") else { return }
+        try rebuildTable()
     }
 
-    private static let schema = """
-        CREATE TABLE IF NOT EXISTS clips (
+    /// 整表搬迁。全程在一个事务里：中途任何一步失败都整体回滚，老表原样保留
+    private func rebuildTable() throws {
+        try db.transaction {
+            try db.execute(Self.tableDDL(name: "clips_new"))
+            try db.execute("""
+                INSERT INTO clips_new (\(Self.allColumns)) SELECT \(Self.allColumns) FROM clips;
+                DROP TABLE clips;
+                ALTER TABLE clips_new RENAME TO clips;
+                """)
+            // 索引跟着老表一起被 DROP 了，重建
+            try db.execute(Self.indexDDL)
+        }
+    }
+
+    /// 建表语句。表名是参数：搬迁时要先建一张临时表，不能靠字符串替换改名
+    private static func tableDDL(name: String) -> String {
+        """
+        CREATE TABLE IF NOT EXISTS \(name) (
           id               INTEGER PRIMARY KEY,
-          kind             TEXT    NOT NULL CHECK (kind IN ('text', 'image')),
-          text             TEXT,              -- 仅文本非空；存原文，不 trim、不改换行，保证输入回去一字不差
+          kind             TEXT    NOT NULL CHECK (kind IN ('text', 'image', 'rich')),
+          text             TEXT,              -- 文本非空；rich 可空（存复制时那串空白，粘回去保持一致）
           image_file       TEXT,              -- 仅图片非空；数据目录下的相对路径 images/<哈希>.png
           image_w          INTEGER,           -- 仅图片非空
           image_h          INTEGER,           -- 仅图片非空
-          preview          TEXT    NOT NULL,  -- 列表展示：文本前 2 行 / "图片 1920×1080"
+          preview          TEXT    NOT NULL,  -- 列表展示：文本前 2 行 / "图片 1920×1080" / "带格式内容 · 3 张图"
           content_hash     TEXT    NOT NULL UNIQUE, -- SHA256(类型 + 原始字节)，去重依据
-          byte_size        INTEGER NOT NULL CHECK (byte_size > 0), -- 文本 UTF-8 字节数 / 图片 PNG 文件大小
+          byte_size        INTEGER NOT NULL CHECK (byte_size > 0), -- 文本字节数 / 图片文件大小 / 格式副本文件大小
           source_bundle_id TEXT,              -- NULL = 来源未知
           source_name      TEXT,              -- NULL = 来源未知
           created_at       REAL    NOT NULL,  -- 首次记录时间（Unix 秒）
@@ -121,10 +151,22 @@ public final class ClipStore {
           pinned_at        REAL,              -- NULL = 未收藏；非 NULL = 收藏时间，"收藏"页按它升序
           rich_file        TEXT,              -- NULL = 没有格式副本；否则数据目录下的相对路径 rich/<哈希>.plist
           rich_size        INTEGER NOT NULL DEFAULT 0, -- 格式副本文件大小；没有时为 0
+          -- rich 记录的正文就是格式副本，所以 rich_file 必须有；它没有图片，text 可有可无
           CHECK ((kind = 'text'  AND text IS NOT NULL AND image_file IS NULL) OR
-                 (kind = 'image' AND text IS NULL AND image_file IS NOT NULL AND image_w > 0 AND image_h > 0))
+                 (kind = 'image' AND text IS NULL AND image_file IS NOT NULL AND image_w > 0 AND image_h > 0) OR
+                 (kind = 'rich'  AND image_file IS NULL AND rich_file IS NOT NULL))
         );
-        CREATE INDEX IF NOT EXISTS idx_clips_last_copied ON clips (last_copied_at DESC);
+        """
+    }
+
+    private static let indexDDL = "CREATE INDEX IF NOT EXISTS idx_clips_last_copied ON clips (last_copied_at DESC);"
+
+    private static var schema: String { tableDDL(name: "clips") + "\n" + indexDDL }
+
+    /// 搬迁时要逐列复制，列名写全，避免依赖 SELECT * 的列顺序
+    private static let allColumns = """
+        id, kind, text, image_file, image_w, image_h, preview, content_hash, byte_size, \
+        source_bundle_id, source_name, created_at, last_copied_at, copy_count, pinned_at, rich_file, rich_size
         """
 
     // MARK: - 写入
@@ -195,6 +237,39 @@ public final class ClipStore {
                     ])
             } catch {
                 images.delete(hash: hash)
+                payloads.delete(hash: hash)
+                throw error
+            }
+            let id = db.lastInsertRowID
+            try enforceRetention()
+            return .inserted(id: id)
+        }
+    }
+
+    /// 记录一条"正文就是格式副本"的内容（飞书表格里纯图片的单元格：剪贴板上没有图片数据，
+    /// 图片只以 <img src=…> 的形式存在于 HTML 里）。
+    /// text 是复制当时那串纯文本（多半只是几个制表符），原样存下来，粘回去时一并写回
+    @discardableResult
+    public func recordRich(_ payload: RichPayload, text: String?, source: SourceApp?) throws -> RecordResult {
+        try queue.sync {
+            let hash = Self.richContentHash(payload)
+            let timestamp = now().timeIntervalSince1970
+            if let id = try bumpIfExists(hash: hash, timestamp: timestamp) {
+                try replaceRich(id: id, hash: hash, rich: payload)
+                return .bumped(id: id)
+            }
+            // 先写文件再写记录：中途崩溃最多留下孤儿文件（启动校验会清掉）
+            let richSize = try payloads.save(payload, hash: hash)
+            do {
+                try db.run("""
+                    INSERT INTO clips (kind, text, preview, content_hash, byte_size, rich_file, rich_size, source_bundle_id, source_name, created_at, last_copied_at)
+                    VALUES ('rich', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, [
+                        .optionalText(text), .text(Self.richPreview(payload)), .text(hash), .integer(Int64(richSize)),
+                        .text(PayloadStore.relativePath(hash: hash)), .integer(Int64(richSize)),
+                        .optionalText(source?.bundleID), .optionalText(source?.name), .real(timestamp), .real(timestamp),
+                    ])
+            } catch {
                 payloads.delete(hash: hash)
                 throw error
             }
@@ -320,16 +395,20 @@ public final class ClipStore {
                 report.removedOrphanFiles += 1
             }
 
-            // 格式副本：文件丢了只清掉引用，记录本身保留（文字还在，不该整条删）；没人引用的文件删掉。
+            // 格式副本文件丢了：文本 / 图片记录只清掉引用（正文还在，不该整条删），
+            // rich 记录整条删（副本就是它的正文）。没人引用的副本文件删掉。
             // 放在删缺图记录之后：那些记录带的格式副本这时已经变成孤儿，正好一起清掉
-            let richRows = try db.query("SELECT id, content_hash FROM clips WHERE rich_file IS NOT NULL") {
-                (id: $0.int(0), hash: $0.text(1) ?? "")
+            let richRows = try db.query("SELECT id, kind, content_hash FROM clips WHERE rich_file IS NOT NULL") {
+                (id: $0.int(0), kind: $0.text(1), hash: $0.text(2) ?? "")
             }
             var referencedRichHashes = Set<String>()
             try db.transaction {
                 for row in richRows {
                     if FileManager.default.fileExists(atPath: payloads.payloadURL(hash: row.hash).path) {
                         referencedRichHashes.insert(row.hash)
+                    } else if row.kind == ClipKind.rich.rawValue {
+                        try db.run("DELETE FROM clips WHERE id = ?", [.integer(row.id)])
+                        report.removedRowsMissingRich += 1
                     } else {
                         try clearRich(id: row.id)
                         report.clearedMissingRich += 1
@@ -413,20 +492,27 @@ public final class ClipStore {
         try enforceRichBudget()
     }
 
-    /// 格式副本预算：未收藏条目从新到旧累加，超出的只丢格式副本，记录本身保留。
-    /// 文字很小又有用，不该因为附件超预算被整条删掉
+    /// 格式副本预算：未收藏条目从新到旧累加，超出部分处理掉。
+    /// 文本 / 图片记录只丢格式副本、正文保留（文字很小又有用）；
+    /// rich 记录的正文就是格式副本，丢了副本记录就成了空壳，所以整条删
     private func enforceRichBudget() throws {
         let rows = try db.query("""
-            SELECT id, content_hash, rich_size FROM clips WHERE pinned_at IS NULL AND rich_file IS NOT NULL
+            SELECT id, kind, content_hash, rich_size FROM clips WHERE pinned_at IS NULL AND rich_file IS NOT NULL
             ORDER BY last_copied_at DESC, id DESC
-            """) { (id: $0.int(0), hash: $0.text(1) ?? "", bytes: Int($0.int(2))) }
+            """) { (id: $0.int(0), kind: $0.text(1), hash: $0.text(2) ?? "", bytes: Int($0.int(3))) }
         var totalBytes = 0
+        var victims: [Victim] = []
         for row in rows {
             totalBytes += row.bytes
             guard totalBytes > retention.maxUnpinnedRichBytes else { continue }
-            try clearRich(id: row.id)
-            payloads.delete(hash: row.hash)
+            if row.kind == ClipKind.rich.rawValue {
+                victims.append(Victim(id: row.id, kind: row.kind, hash: row.hash))
+            } else {
+                try clearRich(id: row.id)
+                payloads.delete(hash: row.hash)
+            }
         }
+        try deleteVictims(victims)
     }
 
     /// 先删记录（事务）再删文件：中途崩溃只会留下孤儿文件，不会出现记录指向不存在的图
@@ -451,6 +537,39 @@ public final class ClipStore {
         hasher.update(data: Data([0]))
         hasher.update(data: bytes)
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 带格式内容的去重依据：优先只按 HTML 的字节算。
+    /// web-custom-data 里可能塞了每次复制都变的会话 id，按它算会让同样的内容反复冒出新条目；
+    /// HTML 稳定得多。没有 HTML 时退回按全部表示拼接计算
+    static func richContentHash(_ payload: RichPayload) -> String {
+        if let html = payload.representations.first(where: { $0.uti == PasteboardType.html }) {
+            return contentHash(kind: .rich, bytes: html.data)
+        }
+        var bytes = Data()
+        for representation in payload.representations {
+            bytes.append(Data(representation.uti.utf8))
+            bytes.append(Data([0]))
+            bytes.append(representation.data)
+        }
+        return contentHash(kind: .rich, bytes: bytes)
+    }
+
+    /// 带格式内容的摘要：数 HTML 原始字节里 <img 出现几次。
+    /// 只做子串计数，不解析 HTML、不转成 String（副本上限 4MB，转字符串开销白给）。
+    /// 大写的 <IMG 数不到，但这只是列表上的一句摘要，数不出来就退回通用说法
+    static func richPreview(_ payload: RichPayload) -> String {
+        guard let html = payload.representations.first(where: { $0.uti == PasteboardType.html }) else {
+            return "带格式内容"
+        }
+        let needle = Data("<img".utf8)
+        var count = 0
+        var start = html.data.startIndex
+        while let found = html.data.range(of: needle, in: start..<html.data.endIndex) {
+            count += 1
+            start = found.upperBound
+        }
+        return count > 0 ? "带格式内容 · \(count) 张图" : "带格式内容"
     }
 
     /// 文本摘要：前 2 个非空行，最多 200 字

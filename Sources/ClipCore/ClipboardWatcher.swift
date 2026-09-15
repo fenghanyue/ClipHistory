@@ -93,6 +93,10 @@ public final class ClipboardWatcher {
             record("\(header)\n  → 记为图片 \(width)×\(height) \(format.rawValue) \(data.count) 字节，格式副本=\(rich)") {
                 try $0.recordImage(data, format: format, width: width, height: height, rich: rich.payload, source: source)
             }
+        case .rich(let payload, let text):
+            record("\(header)\n  → 记为带格式内容 \(payload.typeSummary)（\(payload.byteSize) 字节），纯文本 \(text?.utf8.count ?? 0) 字节") {
+                try $0.recordRich(payload, text: text, source: source)
+            }
         }
     }
 

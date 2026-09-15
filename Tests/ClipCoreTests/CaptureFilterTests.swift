@@ -196,6 +196,45 @@ struct CaptureFilterTests {
         #expect(CaptureFilter.decide(item: item, source: nil) == .skip(.imageUndecodable))
     }
 
+    @Test("飞书表格纯图片单元格（只有空白文本 + 网页格式，剪贴板上一张图都没有）→ 记为带格式内容")
+    func feishuSheetImageOnlyCells() {
+        let item = makeSnapshot(ordered: [
+            ("public.html", html),
+            ("org.chromium.internal.source-rfh-token", blob),
+            ("org.chromium.web-custom-data", custom),
+            ("org.chromium.source-url", sourceURL),
+        ], text: "\t\t\n")
+        #expect(CaptureFilter.decide(item: item, source: nil) == .rich(
+            makeRichPayload([
+                ("public.html", html),
+                ("org.chromium.web-custom-data", custom),
+                ("org.chromium.source-url", sourceURL),
+            ]),
+            text: "\t\t\n"
+        ))
+    }
+
+    @Test("完全没有纯文本、只有网页格式 → 也记为带格式内容")
+    func richWithoutAnyText() {
+        let item = makeSnapshot(ordered: [("public.html", html)])
+        #expect(CaptureFilter.decide(item: item, source: nil) == .rich(
+            makeRichPayload([("public.html", html)]), text: nil
+        ))
+    }
+
+    @Test("空白文本但没有格式副本 → 仍然跳过")
+    func whitespaceWithoutRich() {
+        let item = makeSnapshot(["com.example.private": blob], text: " \n")
+        #expect(CaptureFilter.decide(item: item, source: nil) == .skip(.emptyText))
+    }
+
+    @Test("空白文本 + 超上限的格式副本 → 仍然跳过，不记空壳")
+    func whitespaceWithOversizedRich() {
+        let big = Data(repeating: 9, count: 100)
+        let item = makeSnapshot(ordered: [("public.html", big)], text: " \n")
+        #expect(CaptureFilter.decide(item: item, source: nil, limits: CaptureLimits(maxRichBytes: 99)) == .skip(.emptyText))
+    }
+
     @Test("只有纯文本（备忘录这类）→ 没有格式副本")
     func plainTextOnly() {
         #expect(CaptureFilter.decide(item: makeSnapshot(text: "一段普通文字"), source: nil) == .text("一段普通文字", rich: .none))

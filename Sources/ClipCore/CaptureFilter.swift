@@ -34,6 +34,9 @@ public enum CaptureDecision: Equatable {
     case text(String, rich: RichCapture)
     /// 记为图片：剪贴板里的原始数据、格式和像素尺寸；rich 同上
     case image(Data, format: ImageFormat, width: Int, height: Int, rich: RichCapture)
+    /// 记为带格式的内容：剪贴板上既没有可用文字也没有图片数据，正文就是格式副本本身。
+    /// text 是复制当时那串纯文本（多半只是几个制表符），原样带着，粘回去时一并写回
+    case rich(RichPayload, text: String?)
     /// 跳过，附原因
     case skip(SkipReason)
 }
@@ -116,6 +119,13 @@ public enum CaptureFilter {
         // 规则 8：没有有效文本，但有图片
         if hasImage {
             return decideImage(item: item, limits: limits)
+        }
+
+        // 规则 8 补充：没有可用文字、也没有图片数据，但收到了格式副本 → 记为带格式的内容。
+        // 飞书表格里纯图片的单元格就是这样：剪贴板上一张图都没有，
+        // 图片只以 <img src=…> 的形式待在 HTML 里，纯文本则只有几个制表符
+        if case .payload(let payload) = collectRich(item: item, limits: limits) {
+            return .rich(payload, text: text)
         }
 
         // 规则 7 补充：只有空白文本（空格、换行、全角空格等）→ 跳过

@@ -31,13 +31,12 @@ enum Paster {
     /// 图片同时提供 PNG 和 TIFF：部分 App 只认 TIFF，但 TIFF 体积大，等对方真正要时才生成。
     ///
     /// rich 是复制当时一起存下来的格式副本（HTML/RTF 等），原样写回去，
-    /// 粘贴方（飞书文档、微信）自己挑认识的那一份，只认纯文本的目标（终端、编辑器）会自动降级。
-    /// plainOnly = true 时完全不写格式副本，等于本 App 一直以来的行为，也是出问题时的兜底
+    /// 粘贴方（飞书文档、微信）自己挑认识的那一份，只认纯文本的目标（终端、编辑器）会自动降级
     @discardableResult
-    static func write(item: ClipItem, images: ImageStore, rich: RichPayload?, plainOnly: Bool) -> Bool {
+    static func write(item: ClipItem, images: ImageStore, rich: RichPayload?) -> Bool {
         let pasteboardItem = NSPasteboardItem()
         // 格式副本排在前面：少数 App 会遍历类型列表取第一个认识的，多数 App 按自己的优先级挑，与顺序无关
-        if !plainOnly, let rich {
+        if let rich {
             for representation in rich.representations {
                 pasteboardItem.setData(representation.data, forType: NSPasteboard.PasteboardType(representation.uti))
             }
@@ -53,6 +52,15 @@ enum Paster {
             let provider = TIFFProvider(png: png)
             pasteboardItem.setDataProvider(provider, forTypes: [.tiff])
             currentTIFFProvider = provider
+        case .rich:
+            // 格式副本就是正文，上面已经写进去了；副本丢了这条就没内容可写
+            guard rich != nil else { return false }
+            // 复制当时那串纯文本（多半是几个制表符）原样带上：
+            // 只认纯文本的目标拿到的东西，和当时直接 ⌘C⌘V 一致
+            if let text = item.text {
+                pasteboardItem.setString(text, forType: .string)
+            }
+            currentTIFFProvider = nil
         }
         pasteboardItem.setString(Config.bundleID, forType: sourceMarkerType)
 

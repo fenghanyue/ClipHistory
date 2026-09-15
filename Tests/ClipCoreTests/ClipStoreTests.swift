@@ -25,6 +25,7 @@ final class ClipStoreTests {
     }
 
     let htmlTable = makeRichPayload([("public.html", Data("<table><tr><td>A1</td></tr></table>".utf8))])
+    let imageCellsHTML = Data("<table><tr><td><img src=\"https://a\"></td><td><img src=\"https://b\"></td></tr></table>".utf8)
     let htmlAndCustom = makeRichPayload([
         ("public.html", Data("<table><tr><td>改过了</td></tr></table>".utf8)),
         ("org.chromium.web-custom-data", Data(repeating: 7, count: 32)),
@@ -292,31 +293,134 @@ final class ClipStoreTests {
         #expect(!fileExists(orphan))
     }
 
-    @Test("老版本数据库：打开时自动补上格式副本的列，老数据完好")
+    @Test("老版本数据库：自动补列 + 搬表放宽约束，老数据一条不少、收藏保留")
     func migratesOldDatabase() throws {
         do {
+            // 首版的表：没有 rich 两列，CHECK 约束只认 text / image
             let old = try SQLiteDB(path: directory.appendingPathComponent("clips.sqlite").path)
             try old.execute("""
                 CREATE TABLE clips (
-                  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT, image_file TEXT,
-                  image_w INTEGER, image_h INTEGER, preview TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE,
-                  byte_size INTEGER NOT NULL, source_bundle_id TEXT, source_name TEXT,
+                  id INTEGER PRIMARY KEY,
+                  kind TEXT NOT NULL CHECK (kind IN ('text', 'image')),
+                  text TEXT, image_file TEXT, image_w INTEGER, image_h INTEGER,
+                  preview TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE,
+                  byte_size INTEGER NOT NULL CHECK (byte_size > 0),
+                  source_bundle_id TEXT, source_name TEXT,
                   created_at REAL NOT NULL, last_copied_at REAL NOT NULL,
-                  copy_count INTEGER NOT NULL DEFAULT 1, pinned_at REAL
+                  copy_count INTEGER NOT NULL DEFAULT 1, pinned_at REAL,
+                  CHECK ((kind = 'text'  AND text IS NOT NULL AND image_file IS NULL) OR
+                         (kind = 'image' AND text IS NULL AND image_file IS NOT NULL AND image_w > 0 AND image_h > 0))
                 );
-                INSERT INTO clips (kind, text, preview, content_hash, byte_size, created_at, last_copied_at)
-                VALUES ('text', '老数据', '老数据', 'oldhash', 9, 1, 1);
+                CREATE INDEX idx_clips_last_copied ON clips (last_copied_at DESC);
+                INSERT INTO clips (kind, text, preview, content_hash, byte_size, source_name, created_at, last_copied_at, copy_count, pinned_at)
+                VALUES ('text', '老数据', '老数据', 'oldhash', 9, '飞书', 1, 1, 7, 5);
+                INSERT INTO clips (kind, image_file, image_w, image_h, preview, content_hash, byte_size, created_at, last_copied_at)
+                VALUES ('image', 'images/oldimg.png', 4, 3, '图片 4×3', 'oldimg', 100, 2, 2);
                 """)
         }
 
         let store = try makeStore()
-        let item = try #require(try store.recent().first)
-        #expect(item.text == "老数据")
-        #expect(item.hasRich == false)
 
-        // 补上的列能正常写入
-        let id = try #require(try store.recordText("新数据", rich: htmlTable, source: nil).insertedID)
-        #expect(try store.richPayload(id: id) == htmlTable)
+        // 老数据一条不少，收藏状态、复制次数、来源都保留
+        let items = try store.recent()
+        #expect(items.count == 2)
+        let oldText = try #require(items.first { $0.text == "老数据" })
+        #expect(oldText.copyCount == 7)
+        #expect(oldText.isPinned)
+        #expect(oldText.sourceName == "飞书")
+        #expect(oldText.hasRich == false)
+        #expect(try store.pinned().map(\.text) == ["老数据"])
+        let keptImageRow = try store.recent().contains { $0.kind == .image }
+        #expect(keptImageRow)
+
+        // 补上的列能写，放宽后的约束能放下 rich 记录
+        let textID = try #require(try store.recordText("新数据", rich: htmlTable, source: nil).insertedID)
+        #expect(try store.richPayload(id: textID) == htmlTable)
+        let richID = try #require(try store.recordRich(imageCellsPayload(), text: "\t", source: nil).insertedID)
+        #expect(try store.item(id: richID)?.kind == .rich)
+
+        // 再打开一次不会重复搬表
+        let reopened = try makeStore()
+        #expect(try reopened.counts().total == 4)
+    }
+
+    // MARK: - 带格式内容（正文就是格式副本）
+
+    func imageCellsPayload(custom: Data = Data(repeating: 7, count: 8)) -> RichPayload {
+        makeRichPayload([("public.html", imageCellsHTML), ("org.chromium.web-custom-data", custom)])
+    }
+
+    @Test("飞书纯图片单元格：记成 rich 条目，预览数出图片张数，空白文本原样保留")
+    func recordsRichItem() throws {
+        let store = try makeStore()
+        let id = try #require(try store.recordRich(imageCellsPayload(), text: "\t\t\n", source: feishu).insertedID)
+        let item = try #require(try store.item(id: id))
+
+        #expect(item.kind == .rich)
+        #expect(item.preview == "带格式内容 · 2 张图")
+        #expect(item.text == "\t\t\n")
+        #expect(item.hasRich)
+        #expect(item.byteSize > 0)
+        #expect(try store.richPayload(id: id) == imageCellsPayload())
+    }
+
+    @Test("没有 HTML 的带格式内容：预览退回通用说法")
+    func richPreviewWithoutHTML() throws {
+        let store = try makeStore()
+        let payload = makeRichPayload([("public.rtf", Data("{\\rtf1}".utf8))])
+        let id = try #require(try store.recordRich(payload, text: nil, source: nil).insertedID)
+        #expect(try store.item(id: id)?.preview == "带格式内容")
+        #expect(try store.item(id: id)?.text == nil)
+    }
+
+    @Test("去重只看 HTML：飞书每次复制带的自定义数据变了，仍然算同一条")
+    func richDedupesByHTML() throws {
+        let store = try makeStore()
+        let id = try #require(try store.recordRich(imageCellsPayload(custom: Data([1])), text: nil, source: feishu).insertedID)
+        let again = try store.recordRich(imageCellsPayload(custom: Data([2, 2, 2])), text: nil, source: feishu)
+
+        #expect(again == .bumped(id: id))
+        #expect(try store.counts().total == 1)
+        // 覆盖成最新那份
+        #expect(try store.richPayload(id: id) == imageCellsPayload(custom: Data([2, 2, 2])))
+    }
+
+    @Test("HTML 不同就是两条")
+    func richDifferentHTML() throws {
+        let store = try makeStore()
+        try store.recordRich(makeRichPayload([("public.html", Data("<p>A</p>".utf8))]), text: nil, source: nil)
+        try store.recordRich(makeRichPayload([("public.html", Data("<p>B</p>".utf8))]), text: nil, source: nil)
+        #expect(try store.counts().total == 2)
+    }
+
+    @Test("一致性校验：rich 条目的副本文件丢了 → 整条删掉，不留空壳")
+    func consistencyRemovesRichRowWhenFileMissing() throws {
+        let store = try makeStore()
+        let id = try #require(try store.recordRich(imageCellsPayload(), text: nil, source: nil).insertedID)
+        let hash = try #require(try store.item(id: id)).contentHash
+        try FileManager.default.removeItem(at: store.payloads.payloadURL(hash: hash))
+
+        let report = try store.verifyConsistency()
+
+        #expect(report.removedRowsMissingRich == 1)
+        #expect(try store.item(id: id) == nil)
+    }
+
+    @Test("超出格式副本预算：rich 条目整条删掉，不留没有正文的空壳")
+    func richBudgetDeletesRichRows() throws {
+        // 两份等长的 HTML：副本文件大小相同，预算刚好只够放一条
+        let older = makeRichPayload([("public.html", Data("<p><img src=\"a\"></p>".utf8))])
+        let newer = makeRichPayload([("public.html", Data("<p><img src=\"b\"></p>".utf8))])
+
+        let sizing = try makeStore()
+        let olderID = try #require(try sizing.recordRich(older, text: nil, source: nil).insertedID)
+        let bytes = try #require(try sizing.item(id: olderID)).byteSize
+
+        let store = try makeStore(maxRichBytes: bytes)
+        let newerID = try #require(try store.recordRich(newer, text: nil, source: nil).insertedID)
+
+        #expect(try store.item(id: newerID)?.kind == .rich)  // 最新的留住
+        #expect(try store.item(id: olderID) == nil)          // 更旧的整条删掉
     }
 
     // MARK: - 读取与持久化
