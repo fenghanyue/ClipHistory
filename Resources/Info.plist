@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>local.cliphistory</string>
+	<key>CFBundleName</key>
+	<string>ClipHistory</string>
+	<key>CFBundleDisplayName</key>
+	<string>ClipHistory</string>
+	<key>CFBundleExecutable</key>
+	<string>ClipHistory</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<!-- 系统返回的 App 名称等跟随用户语言（否则可能显示"Feishu"而不是"飞书"） -->
+	<key>CFBundleAllowMixedLocalizations</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<!-- 后台 App：不显示 Dock 图标，只在菜单栏显示 -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>
