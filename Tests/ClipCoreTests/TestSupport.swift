@@ -94,10 +94,3 @@ final class FakePasteboard: PasteboardSource {
         return makeSnapshot(entries, text: text)
     }
 }
-
-extension RecordResult {
-    var insertedID: Int64? {
-        if case .inserted(let id) = self { return id }
-        return nil
-    }
-}

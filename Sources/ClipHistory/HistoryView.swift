@@ -7,7 +7,7 @@ enum HistoryTab {
     case pinned
 }
 
-/// 弹出列表的数据和状态：当前标签页、条目、选中项、暂停状态
+/// 弹出列表的数据和状态：当前标签页、搜索词、条目、选中项、暂停状态、悬浮模式
 final class HistoryModel: ObservableObject {
     @Published private(set) var tab: HistoryTab = .recent
     @Published private(set) var items: [ClipItem] = []
@@ -15,6 +15,18 @@ final class HistoryModel: ObservableObject {
     @Published private(set) var isTrusted = Paster.isTrusted
     @Published private(set) var isPaused = false
     @Published var selectedIndex = 0
+    /// 搜索词；非空时列表只显示匹配的记录
+    @Published var query = "" {
+        didSet {
+            if query != oldValue {
+                loadItems(atLeast: 0)
+            }
+        }
+    }
+    /// 悬浮模式：选中输入后面板不关闭，方便连续粘贴多条。持久化保存
+    @Published var keepOpen = UserDefaults.standard.bool(forKey: "panelKeepOpen") {
+        didSet { UserDefaults.standard.set(keepOpen, forKey: "panelKeepOpen") }
+    }
 
     var onPick: ((ClipItem) -> Void)?
     var onOpenAccessibilitySettings: (() -> Void)?
@@ -36,10 +48,11 @@ final class HistoryModel: ObservableObject {
         items.indices.contains(selectedIndex) ? items[selectedIndex] : nil
     }
 
-    /// 每次弹出时调用：回到"最近"页的第一条
+    /// 每次弹出时调用：回到"最近"页的第一条，清空上次的搜索词
     func prepareForShow() {
         tab = .recent
         selectedIndex = 0
+        query = ""
         isTrusted = Paster.isTrusted
         isPaused = pauseState()
         lastHoverMouseLocation = NSEvent.mouseLocation
@@ -56,7 +69,9 @@ final class HistoryModel: ObservableObject {
     /// 滚动到底部时加载下一页（只有"最近"页分页）；按 id 去重，防止翻页期间有新记录导致重复
     func loadMore() {
         guard tab == .recent, hasMore else { return }
-        let nextPage = (try? store.recent(offset: items.count, limit: Config.pageSize)) ?? []
+        let nextPage = query.isEmpty
+            ? (try? store.recent(offset: items.count, limit: Config.pageSize)) ?? []
+            : (try? store.search(query, pinnedOnly: false, offset: items.count, limit: Config.pageSize)) ?? []
         let existingIDs = Set(items.map(\.id))
         items.append(contentsOf: nextPage.filter { !existingIDs.contains($0.id) })
         hasMore = nextPage.count == Config.pageSize
@@ -133,16 +148,21 @@ final class HistoryModel: ObservableObject {
         return icon
     }
 
-    /// 读取当前标签页的数据；收藏、删除之后传入当前条数，保持列表长度和滚动位置不变
+    /// 读取当前标签页的数据；收藏、删除之后传入当前条数，保持列表长度和滚动位置不变。
+    /// 搜索词非空时只显示匹配的记录
     private func loadItems(atLeast minimumCount: Int) {
+        let limit = max(Config.pageSize, minimumCount)
         switch tab {
         case .recent:
-            let limit = max(Config.pageSize, minimumCount)
-            let page = (try? store.recent(offset: 0, limit: limit)) ?? []
+            let page = query.isEmpty
+                ? (try? store.recent(offset: 0, limit: limit)) ?? []
+                : (try? store.search(query, pinnedOnly: false, offset: 0, limit: limit)) ?? []
             items = page
             hasMore = page.count == limit
         case .pinned:
-            items = (try? store.pinned()) ?? []
+            items = query.isEmpty
+                ? (try? store.pinned()) ?? []
+                : (try? store.search(query, pinnedOnly: true, offset: 0, limit: limit)) ?? []
             hasMore = false
         }
         selectedIndex = min(selectedIndex, max(items.count - 1, 0))
@@ -156,6 +176,7 @@ struct HistoryView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            searchBar
             if model.isPaused {
                 pausedBanner
             }
@@ -186,6 +207,18 @@ struct HistoryView: View {
             }
             Spacer()
             Button {
+                model.keepOpen.toggle()
+            } label: {
+                Image(systemName: model.keepOpen ? "pin.fill" : "pin")
+                    .font(.system(size: 12))
+                    .foregroundStyle(model.keepOpen ? Color.accentColor : Color.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(model.keepOpen ? "取消悬浮：选中输入后关闭面板" : "一直悬浮：选中输入后面板不关闭，方便连续粘贴")
+            Button {
                 model.togglePause()
             } label: {
                 Label(model.isPaused ? "恢复记录" : "暂停记录",
@@ -200,6 +233,37 @@ struct HistoryView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
+    }
+
+    /// 搜索框：面板一弹出就是焦点，直接打字过滤当前标签页的记录
+    private var searchBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            TextField("搜索", text: $model.query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+            if !model.query.isEmpty {
+                Button {
+                    model.query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.primary.opacity(0.06))
+        )
+        .padding(.horizontal, 8)
+        .padding(.bottom, 8)
     }
 
     private var pausedBanner: some View {
@@ -232,14 +296,21 @@ struct HistoryView: View {
 
     private var emptyState: some View {
         VStack(spacing: 8) {
-            Image(systemName: model.tab == .recent ? "doc.on.clipboard" : "pin")
+            Image(systemName: model.query.isEmpty ? (model.tab == .recent ? "doc.on.clipboard" : "pin") : "magnifyingglass")
                 .font(.system(size: 28))
                 .foregroundStyle(.tertiary)
-            Text(model.tab == .recent ? "还没有记录，复制点东西试试" : "还没有收藏\n在「最近」里点条目右边的 ☆ 收藏")
+            Text(emptyStateText)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var emptyStateText: String {
+        if !model.query.isEmpty {
+            return "没有匹配「\(model.query)」的记录"
+        }
+        return model.tab == .recent ? "还没有记录，复制点东西试试" : "还没有收藏\n在「最近」里点条目右边的 ☆ 收藏"
     }
 
     private var list: some View {
@@ -412,8 +483,7 @@ struct PreviewFooter: View {
         case .image: parts.append(item.preview)
         case .rich: parts.append("\(item.richByteSize / 1024) KB 格式数据")
         }
-        parts.append("复制 \(item.copyCount) 次")
-        parts.append("首次 \(TimeText.describe(item.createdAt))")
+        parts.append("复制于 \(TimeText.describe(item.createdAt))")
         return parts.joined(separator: " · ")
     }
 

@@ -4,7 +4,7 @@ import Foundation
 public final class ClipboardWatcher {
     public private(set) var isPaused = false
 
-    /// 新增或更新了记录后，在主线程回调（界面刷新用）
+    /// 新增记录后，在主线程回调（界面刷新用）
     public var onChange: (() -> Void)?
 
     private let pasteboard: PasteboardSource
@@ -114,12 +114,12 @@ public final class ClipboardWatcher {
         return frontmostApp()
     }
 
-    private func record(_ description: String, _ write: @escaping (ClipStore) throws -> RecordResult) {
+    private func record(_ description: String, _ write: @escaping (ClipStore) throws -> Int64) {
         recordQueue.async { [weak self] in
             guard let self else { return }
             do {
-                let result = try write(self.store)
-                self.log("\(description)，\(result)")
+                let id = try write(self.store)
+                self.log("\(description)，新增记录 #\(id)")
                 DispatchQueue.main.async { self.onChange?() }
             } catch {
                 self.log("\(description)，写入失败：\(error)")

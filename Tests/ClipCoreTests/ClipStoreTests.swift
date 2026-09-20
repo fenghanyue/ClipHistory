@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import ClipCore
 
-@Suite("存储：去重、保留清理、收藏、一致性校验")
+@Suite("存储：不去重、保留清理、收藏、搜索、一致性校验")
 final class ClipStoreTests {
     let directory = makeTemporaryDirectory()
     let clock = TestClock()
@@ -35,23 +35,24 @@ final class ClipStoreTests {
         FileManager.default.fileExists(atPath: url.path)
     }
 
-    // MARK: - 去重与原文保真
+    // MARK: - 不去重与原文保真
 
-    @Test("同样内容再复制：不新增，次数 +1，排到最前")
-    func dedupeBumpsToTop() throws {
+    @Test("同样内容再复制：新增独立的一条，各自按复制时间排队")
+    func duplicateContentInsertsNewRow() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordText("A", source: feishu).insertedID)
+        let first = try store.recordText("A", source: feishu)
         try store.recordText("B", source: nil)
-        #expect(try store.recordText("A", source: feishu) == .bumped(id: id))
+        let second = try store.recordText("A", source: feishu)
 
+        #expect(first != second)
         let items = try store.recent()
-        #expect(items.map(\.text) == ["A", "B"])
-        #expect(items[0].copyCount == 2)
+        #expect(items.map(\.id) == [second, items[1].id, first])
+        #expect(items.map(\.text) == ["A", "B", "A"])
         #expect(items[0].sourceName == "飞书")
         #expect(items[1].sourceName == nil)
     }
 
-    @Test("按原文精确去重、一字不差存取（换行、制表符、\\0、emoji）")
+    @Test("一字不差存取（换行、制表符、\\0、emoji）")
     func exactTextFidelity() throws {
         let store = try makeStore()
         let samples = ["hello", "hello\n", "  缩进\n\t制表符\r\n", "含\u{0}空字符", "emoji 👨‍👩‍👧"]
@@ -84,7 +85,7 @@ final class ClipStoreTests {
     @Test("收藏的条目不计入上限、不会被清理")
     func pinnedSurviveRetention() throws {
         let store = try makeStore(maxItems: 2)
-        let pinnedID = try #require(try store.recordText("收藏", source: nil).insertedID)
+        let pinnedID = try store.recordText("收藏", source: nil)
         try store.setPinned(id: pinnedID, true)
         for index in 1...4 {
             try store.recordText("\(index)", source: nil)
@@ -141,12 +142,12 @@ final class ClipStoreTests {
         #expect(fileExists(store.images.thumbnailURL(hash: item.contentHash)))
     }
 
-    // MARK: - 收藏、删除、选中输入
+    // MARK: - 收藏、删除
 
     @Test("删除：收藏的删不掉，取消收藏后可以删，图片文件一起删")
     func deleteRespectsPin() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordImage(makeImageData(.png), format: .png, width: 4, height: 3, source: nil).insertedID)
+        let id = try store.recordImage(makeImageData(.png), format: .png, width: 4, height: 3, source: nil)
         let hash = try #require(try store.item(id: id)).contentHash
 
         try store.setPinned(id: id, true)
@@ -159,33 +160,43 @@ final class ClipStoreTests {
         #expect(!fileExists(store.images.imageURL(hash: hash)))
     }
 
-    @Test("选中输入后：排到最前，次数 +1")
-    func markUsed() throws {
+    @Test("同一张图片复制两次：两条记录共享图片文件，删一条不影响另一条")
+    func duplicateImagesShareFiles() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordText("A", source: nil).insertedID)
-        try store.recordText("B", source: nil)
-        try store.markUsed(id: id)
+        let data = makeImageData(.png)
+        let first = try store.recordImage(data, format: .png, width: 4, height: 3, source: nil)
+        let second = try store.recordImage(data, format: .png, width: 4, height: 3, source: nil)
 
+        #expect(first != second)
         let items = try store.recent()
-        #expect(items.map(\.text) == ["A", "B"])
-        #expect(items[0].copyCount == 2)
+        #expect(items.map(\.id) == [second, first])
+        let hash = items[0].contentHash
+
+        // 删掉一条：图片文件还在，另一条照常显示
+        #expect(try store.delete(id: second) == true)
+        #expect(fileExists(store.images.imageURL(hash: hash)))
+        #expect(fileExists(store.images.thumbnailURL(hash: hash)))
+        #expect(try store.item(id: first)?.kind == .image)
+
+        // 最后一条也删掉：文件才真正删除
+        #expect(try store.delete(id: first) == true)
+        #expect(!fileExists(store.images.imageURL(hash: hash)))
     }
 
     @Test("收藏页按收藏先后固定排列")
     func pinnedOrder() throws {
         let store = try makeStore()
-        let first = try #require(try store.recordText("先收藏", source: nil).insertedID)
-        let second = try #require(try store.recordText("后收藏", source: nil).insertedID)
+        let first = try store.recordText("先收藏", source: nil)
+        let second = try store.recordText("后收藏", source: nil)
         try store.setPinned(id: second, true)
         try store.setPinned(id: first, true)
-        try store.markUsed(id: second)
         #expect(try store.pinned().map(\.text) == ["后收藏", "先收藏"])
     }
 
     @Test("清空历史保留收藏")
     func clearKeepsPinned() throws {
         let store = try makeStore()
-        let pinnedID = try #require(try store.recordText("收藏", source: nil).insertedID)
+        let pinnedID = try store.recordText("收藏", source: nil)
         try store.setPinned(id: pinnedID, true)
         try store.recordText("普通", source: nil)
         try store.recordImage(makeImageData(.png), format: .png, width: 4, height: 3, source: nil)
@@ -200,7 +211,7 @@ final class ClipStoreTests {
     @Test("带格式副本的文本：记录标记为含格式，副本文件落盘，内容能原样读回")
     func recordsRichPayload() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordText("A1", rich: htmlTable, source: feishu).insertedID)
+        let id = try store.recordText("A1", rich: htmlTable, source: feishu)
         let item = try #require(try store.item(id: id))
 
         #expect(item.hasRich)
@@ -209,40 +220,51 @@ final class ClipStoreTests {
         #expect(try store.richPayload(id: id) == htmlTable)
     }
 
-    @Test("去重不受格式影响：同一段文字带格式和不带格式仍然是一条")
-    func richDoesNotAffectDedupe() throws {
+    @Test("同一段文字带格式和不带格式各记一条，互不影响")
+    func richAndPlainAreSeparateRows() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordText("A1", rich: htmlTable, source: feishu).insertedID)
-        #expect(try store.recordText("A1", source: nil) == .bumped(id: id))
-        #expect(try store.counts().total == 1)
+        let withRich = try store.recordText("A1", rich: htmlTable, source: feishu)
+        let plain = try store.recordText("A1", source: nil)
+
+        #expect(withRich != plain)
+        #expect(try store.counts().total == 2)
+        #expect(try store.item(id: withRich)?.hasRich == true)
+        #expect(try store.item(id: plain)?.hasRich == false)
+        // 老记录的格式副本不受后来的纯文本复制影响
+        #expect(try store.richPayload(id: withRich) == htmlTable)
     }
 
-    @Test("再复制一次：格式副本被新的覆盖")
-    func richReplacedOnBump() throws {
+    @Test("同内容再复制：格式副本文件同名，后存的覆盖先存的，两条记录读到的都是最新那份")
+    func duplicateRichSharesLatestFile() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordText("A1", rich: htmlTable, source: feishu).insertedID)
-        try store.recordText("A1", rich: htmlAndCustom, source: feishu)
-        #expect(try store.richPayload(id: id) == htmlAndCustom)
+        let first = try store.recordText("A1", rich: htmlTable, source: feishu)
+        let second = try store.recordText("A1", rich: htmlAndCustom, source: feishu)
+
+        #expect(first != second)
+        #expect(try store.richPayload(id: first) == htmlAndCustom)
+        #expect(try store.richPayload(id: second) == htmlAndCustom)
     }
 
-    @Test("再复制一次但这次没有格式：旧的格式副本被清掉，文件也删掉")
-    func richClearedOnPlainBump() throws {
+    @Test("删除共享格式副本的一条记录：文件保留给另一条，最后一条删掉时文件才删")
+    func deleteSharedRichKeepsFile() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordText("A1", rich: htmlTable, source: feishu).insertedID)
-        let hash = try #require(try store.item(id: id)).contentHash
+        let first = try store.recordText("A1", rich: htmlTable, source: feishu)
+        let second = try store.recordText("A1", rich: htmlTable, source: feishu)
+        let hash = try #require(try store.item(id: first)).contentHash
 
-        try store.recordText("A1", source: nil)
+        #expect(try store.delete(id: second) == true)
+        #expect(try store.richPayload(id: first) == htmlTable)
+        #expect(fileExists(store.payloads.payloadURL(hash: hash)))
 
-        #expect(try store.item(id: id)?.hasRich == false)
-        #expect(try store.richPayload(id: id) == nil)
+        #expect(try store.delete(id: first) == true)
         #expect(!fileExists(store.payloads.payloadURL(hash: hash)))
     }
 
     @Test("图片也能带格式副本（飞书表格里的图文单元格）")
     func recordsRichOnImage() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordImage(makeImageData(.png), format: .png, width: 4, height: 3,
-                                                    rich: htmlTable, source: feishu).insertedID)
+        let id = try store.recordImage(makeImageData(.png), format: .png, width: 4, height: 3,
+                                       rich: htmlTable, source: feishu)
         #expect(try store.item(id: id)?.hasRich == true)
         #expect(try store.richPayload(id: id) == htmlTable)
     }
@@ -250,7 +272,7 @@ final class ClipStoreTests {
     @Test("删除和清空历史都会连带删掉格式副本文件")
     func deleteRemovesRichFile() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordText("删我", rich: htmlTable, source: nil).insertedID)
+        let id = try store.recordText("删我", rich: htmlTable, source: nil)
         let hash = try #require(try store.item(id: id)).contentHash
         #expect(try store.delete(id: id) == true)
         #expect(!fileExists(store.payloads.payloadURL(hash: hash)))
@@ -263,12 +285,12 @@ final class ClipStoreTests {
     @Test("格式副本超出总预算：只丢最旧的格式副本，记录本身保留")
     func richBudgetDropsPayloadsNotRows() throws {
         let sizing = try makeStore()
-        let first = try #require(try sizing.recordText("旧", rich: htmlTable, source: nil).insertedID)
+        let first = try sizing.recordText("旧", rich: htmlTable, source: nil)
         let payloadBytes = try #require(try sizing.item(id: first)).richByteSize
 
         // 预算刚好够放一条：最新那条留住，更旧的只丢格式副本，记录和文字都还在
         let store = try makeStore(maxRichBytes: payloadBytes)
-        let second = try #require(try store.recordText("新", rich: htmlTable, source: nil).insertedID)
+        let second = try store.recordText("新", rich: htmlTable, source: nil)
 
         #expect(try store.item(id: first)?.hasRich == false)
         #expect(try store.item(id: second)?.hasRich == true)
@@ -278,7 +300,7 @@ final class ClipStoreTests {
     @Test("一致性校验：格式副本文件丢了只清引用不删记录，孤儿副本文件删掉")
     func consistencyKeepsRowWhenRichFileMissing() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordText("文字还在", rich: htmlTable, source: nil).insertedID)
+        let id = try store.recordText("文字还在", rich: htmlTable, source: nil)
         let hash = try #require(try store.item(id: id)).contentHash
         try FileManager.default.removeItem(at: store.payloads.payloadURL(hash: hash))
         let orphan = store.payloads.directory.appendingPathComponent("deadbeef.plist")
@@ -293,10 +315,10 @@ final class ClipStoreTests {
         #expect(!fileExists(orphan))
     }
 
-    @Test("老版本数据库：自动补列 + 搬表放宽约束，老数据一条不少、收藏保留")
+    @Test("老版本数据库：自动补列 + 搬表去掉去重约束，老数据一条不少、收藏保留")
     func migratesOldDatabase() throws {
         do {
-            // 首版的表：没有 rich 两列，CHECK 约束只认 text / image
+            // 首版的表：没有 rich 两列，CHECK 约束只认 text / image，content_hash 带 UNIQUE，有 copy_count 列
             let old = try SQLiteDB(path: directory.appendingPathComponent("clips.sqlite").path)
             try old.execute("""
                 CREATE TABLE clips (
@@ -321,11 +343,10 @@ final class ClipStoreTests {
 
         let store = try makeStore()
 
-        // 老数据一条不少，收藏状态、复制次数、来源都保留
+        // 老数据一条不少，收藏状态、来源都保留
         let items = try store.recent()
         #expect(items.count == 2)
         let oldText = try #require(items.first { $0.text == "老数据" })
-        #expect(oldText.copyCount == 7)
         #expect(oldText.isPinned)
         #expect(oldText.sourceName == "飞书")
         #expect(oldText.hasRich == false)
@@ -334,14 +355,18 @@ final class ClipStoreTests {
         #expect(keptImageRow)
 
         // 补上的列能写，放宽后的约束能放下 rich 记录
-        let textID = try #require(try store.recordText("新数据", rich: htmlTable, source: nil).insertedID)
+        let textID = try store.recordText("新数据", rich: htmlTable, source: nil)
         #expect(try store.richPayload(id: textID) == htmlTable)
-        let richID = try #require(try store.recordRich(imageCellsPayload(), text: "\t", source: nil).insertedID)
+        let richID = try store.recordRich(imageCellsPayload(), text: "\t", source: nil)
         #expect(try store.item(id: richID)?.kind == .rich)
+
+        // UNIQUE 约束已去掉：同样的内容可以再记一条
+        try store.recordText("新数据", source: nil)
+        #expect(try store.recent().filter { $0.text == "新数据" }.count == 2)
 
         // 再打开一次不会重复搬表
         let reopened = try makeStore()
-        #expect(try reopened.counts().total == 4)
+        #expect(try reopened.counts().total == 5)
     }
 
     // MARK: - 带格式内容（正文就是格式副本）
@@ -353,7 +378,7 @@ final class ClipStoreTests {
     @Test("飞书纯图片单元格：记成 rich 条目，预览数出图片张数，空白文本原样保留")
     func recordsRichItem() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordRich(imageCellsPayload(), text: "\t\t\n", source: feishu).insertedID)
+        let id = try store.recordRich(imageCellsPayload(), text: "\t\t\n", source: feishu)
         let item = try #require(try store.item(id: id))
 
         #expect(item.kind == .rich)
@@ -368,21 +393,22 @@ final class ClipStoreTests {
     func richPreviewWithoutHTML() throws {
         let store = try makeStore()
         let payload = makeRichPayload([("public.rtf", Data("{\\rtf1}".utf8))])
-        let id = try #require(try store.recordRich(payload, text: nil, source: nil).insertedID)
+        let id = try store.recordRich(payload, text: nil, source: nil)
         #expect(try store.item(id: id)?.preview == "带格式内容")
         #expect(try store.item(id: id)?.text == nil)
     }
 
-    @Test("去重只看 HTML：飞书每次复制带的自定义数据变了，仍然算同一条")
-    func richDedupesByHTML() throws {
+    @Test("HTML 相同就共享同一个副本文件：飞书每次复制带的自定义数据变了，文件以最新那份为准")
+    func richSharesFileByHTML() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordRich(imageCellsPayload(custom: Data([1])), text: nil, source: feishu).insertedID)
-        let again = try store.recordRich(imageCellsPayload(custom: Data([2, 2, 2])), text: nil, source: feishu)
+        let first = try store.recordRich(imageCellsPayload(custom: Data([1])), text: nil, source: feishu)
+        let second = try store.recordRich(imageCellsPayload(custom: Data([2, 2, 2])), text: nil, source: feishu)
 
-        #expect(again == .bumped(id: id))
-        #expect(try store.counts().total == 1)
-        // 覆盖成最新那份
-        #expect(try store.richPayload(id: id) == imageCellsPayload(custom: Data([2, 2, 2])))
+        #expect(first != second)
+        #expect(try store.counts().total == 2)
+        // 两条记录的正文哈希相同（只按 HTML 算），副本文件同名，后存的覆盖先存的
+        #expect(try store.richPayload(id: first) == imageCellsPayload(custom: Data([2, 2, 2])))
+        #expect(try store.richPayload(id: second) == imageCellsPayload(custom: Data([2, 2, 2])))
     }
 
     @Test("HTML 不同就是两条")
@@ -396,7 +422,7 @@ final class ClipStoreTests {
     @Test("一致性校验：rich 条目的副本文件丢了 → 整条删掉，不留空壳")
     func consistencyRemovesRichRowWhenFileMissing() throws {
         let store = try makeStore()
-        let id = try #require(try store.recordRich(imageCellsPayload(), text: nil, source: nil).insertedID)
+        let id = try store.recordRich(imageCellsPayload(), text: nil, source: nil)
         let hash = try #require(try store.item(id: id)).contentHash
         try FileManager.default.removeItem(at: store.payloads.payloadURL(hash: hash))
 
@@ -413,11 +439,11 @@ final class ClipStoreTests {
         let newer = makeRichPayload([("public.html", Data("<p><img src=\"b\"></p>".utf8))])
 
         let sizing = try makeStore()
-        let olderID = try #require(try sizing.recordRich(older, text: nil, source: nil).insertedID)
+        let olderID = try sizing.recordRich(older, text: nil, source: nil)
         let bytes = try #require(try sizing.item(id: olderID)).byteSize
 
         let store = try makeStore(maxRichBytes: bytes)
-        let newerID = try #require(try store.recordRich(newer, text: nil, source: nil).insertedID)
+        let newerID = try store.recordRich(newer, text: nil, source: nil)
 
         #expect(try store.item(id: newerID)?.kind == .rich)  // 最新的留住
         #expect(try store.item(id: olderID) == nil)          // 更旧的整条删掉
@@ -438,6 +464,43 @@ final class ClipStoreTests {
     func persistence() throws {
         try makeStore().recordText("持久化", source: nil)
         #expect(try makeStore().recent().map(\.text) == ["持久化"])
+    }
+
+    // MARK: - 搜索
+
+    @Test("搜索：按正文子串匹配，按复制时间倒序，分页")
+    func searchByText() throws {
+        let store = try makeStore()
+        try store.recordText("今天天气不错", source: nil)
+        try store.recordText("苹果和香蕉", source: nil)
+        try store.recordText("今天的会议纪要", source: nil)
+
+        #expect(try store.search("今天", pinnedOnly: false).map(\.text) == ["今天的会议纪要", "今天天气不错"])
+        #expect(try store.search("今天", pinnedOnly: false, offset: 1, limit: 1).map(\.text) == ["今天天气不错"])
+        #expect(try store.search("不存在", pinnedOnly: false).isEmpty)
+    }
+
+    @Test("搜索：LIKE 通配符按字面量处理，ASCII 不区分大小写")
+    func searchEscapesWildcards() throws {
+        let store = try makeStore()
+        try store.recordText("进度 100% 完成", source: nil)
+        try store.recordText("Hello World", source: nil)
+        try store.recordText("百分之100", source: nil)
+
+        // % 是 LIKE 通配符，转义后只匹配字面量
+        #expect(try store.search("100%", pinnedOnly: false).map(\.text) == ["进度 100% 完成"])
+        #expect(try store.search("hello", pinnedOnly: false).map(\.text) == ["Hello World"])
+    }
+
+    @Test("搜索：pinnedOnly 只在收藏里找")
+    func searchPinnedOnly() throws {
+        let store = try makeStore()
+        let pinnedID = try store.recordText("收藏的苹果", source: nil)
+        try store.recordText("普通的苹果", source: nil)
+        try store.setPinned(id: pinnedID, true)
+
+        #expect(try store.search("苹果", pinnedOnly: true).map(\.text) == ["收藏的苹果"])
+        #expect(try store.search("苹果", pinnedOnly: false).map(\.text) == ["普通的苹果", "收藏的苹果"])
     }
 
     // MARK: - 启动一致性校验

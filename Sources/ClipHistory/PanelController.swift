@@ -89,6 +89,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
         panel.invalidateShadow()
         startMonitors()
+        focusSearchField()
     }
 
     func close() {
@@ -96,8 +97,9 @@ final class PanelController: NSObject, NSWindowDelegate {
         panel.orderOut(nil)
     }
 
-    // 点了列表外面（其他 App、桌面）→ 列表失去键盘焦点 → 关闭
+    // 点了列表外面（其他 App、桌面）→ 列表失去键盘焦点 → 关闭（悬浮模式下不关）
     func windowDidResignKey(_ notification: Notification) {
+        guard !model.keepOpen else { return }
         close()
     }
 
@@ -107,13 +109,13 @@ final class PanelController: NSObject, NSWindowDelegate {
         stopMonitors()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.panel.isKeyWindow else { return event }
-            self.handleKey(event)
-            // 列表打开期间吞掉所有按键，避免系统"咚"的提示音
-            return nil
+            // 已处理的按键吞掉（返回 nil）；其余按键（比如在搜索框里打字）放行给输入框
+            return self.handleKey(event) ? nil : event
         }
-        // 兜底：点击其他 App 的窗口时关闭（监听鼠标点击不需要额外权限）
+        // 兜底：点击其他 App 的窗口时关闭（监听鼠标点击不需要额外权限；悬浮模式下不关）
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.close()
+            guard let self, !self.model.keepOpen else { return }
+            self.close()
         }
     }
 
@@ -124,7 +126,8 @@ final class PanelController: NSObject, NSWindowDelegate {
         clickMonitor = nil
     }
 
-    private func handleKey(_ event: NSEvent) {
+    /// 返回 true 表示按键已被列表处理（吞掉）；false 表示放行给当前焦点控件（搜索框）
+    private func handleKey(_ event: NSEvent) -> Bool {
         switch Int(event.keyCode) {
         case kVK_Escape:
             close()
@@ -132,16 +135,16 @@ final class PanelController: NSObject, NSWindowDelegate {
             model.moveSelection(by: 1)
         case kVK_UpArrow:
             model.moveSelection(by: -1)
-        case kVK_LeftArrow:
-            model.switchTab(.recent)
-        case kVK_RightArrow:
-            model.switchTab(.pinned)
+        case kVK_LeftArrow, kVK_RightArrow:
+            // ⌘← / ⌥← 之类留给搜索框移动光标，只有裸方向键才切换标签页
+            guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return false }
+            model.switchTab(Int(event.keyCode) == kVK_LeftArrow ? .recent : .pinned)
         case kVK_Return, kVK_ANSI_KeypadEnter:
             model.pickSelected()
         default:
-            // 其他按键（包括数字键）不做任何操作
-            break
+            return false
         }
+        return true
     }
 
     // MARK: - 选中后自动输入
@@ -153,7 +156,10 @@ final class PanelController: NSObject, NSWindowDelegate {
             return
         }
         let target = targetApp
-        close()
+        // 悬浮模式下保持打开，方便连续粘贴多条；否则选中即关闭
+        if !model.keepOpen {
+            close()
+        }
 
         let rich = try? store.richPayload(id: item.id)
         guard Paster.write(item: item, images: store.images, rich: rich) else {
@@ -161,7 +167,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             DebugLog.write("选中输入失败：条目 #\(item.id) 无法写入剪贴板（图片文件可能丢失）")
             return
         }
-        try? store.markUsed(id: item.id)
+        // 选中输入不改变历史记录：列表顺序只跟随真正的复制动作
 
         guard Paster.isTrusted else {
             Toast.show("已复制，按 ⌘V 粘贴（开启辅助功能后可自动输入）")
@@ -184,6 +190,25 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
         DebugLog.write("选中条目 #\(item.id)（\(item.kind.rawValue)，格式副本 \(rich?.representations.count ?? 0) 项），"
             + "输入到 \(target?.localizedName ?? "未知")")
+    }
+
+    // MARK: - 搜索框焦点
+
+    /// 每次弹出后把焦点交给搜索框：直接打字就能搜索
+    private func focusSearchField() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let contentView = self.panel.contentView,
+                  let field = Self.findTextField(in: contentView) else { return }
+            self.panel.makeFirstResponder(field)
+        }
+    }
+
+    private static func findTextField(in view: NSView) -> NSTextField? {
+        for subview in view.subviews {
+            if let field = subview as? NSTextField { return field }
+            if let found = findTextField(in: subview) { return found }
+        }
+        return nil
     }
 
     // MARK: - 外观

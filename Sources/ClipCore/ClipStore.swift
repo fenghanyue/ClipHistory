@@ -31,7 +31,6 @@ public struct ClipItem: Identifiable, Equatable {
     public let sourceName: String?
     public let createdAt: Date
     public let lastCopiedAt: Date
-    public let copyCount: Int
     /// nil 表示未收藏
     public let pinnedAt: Date?
 
@@ -54,12 +53,7 @@ public struct RetentionLimits: Equatable {
     }
 }
 
-public enum RecordResult: Equatable {
-    /// 新增了一条记录
-    case inserted(id: Int64)
-    /// 已有同样内容：只更新了时间和次数
-    case bumped(id: Int64)
-}
+
 
 public struct ConsistencyReport: Equatable, CustomStringConvertible {
     public var removedRowsMissingImage = 0
@@ -96,9 +90,9 @@ public final class ClipStore {
         try migrate()
     }
 
-    /// 老版本数据库的迁移。两步都按当前表的实际状态判断，天然幂等，不需要版本号
+    /// 老版本数据库的迁移。各步都按当前表的实际状态判断，天然幂等，不需要版本号
     private func migrate() throws {
-        // 第一步：补上后加的两列
+        // 第一步：补上后加的两列（搬表时按列名复制数据，列得先存在）
         let existing = Set(try db.query("PRAGMA table_info(clips)") { $0.text(1) ?? "" })
         if !existing.contains("rich_file") {
             try db.run("ALTER TABLE clips ADD COLUMN rich_file TEXT")
@@ -107,13 +101,15 @@ public final class ClipStore {
             try db.run("ALTER TABLE clips ADD COLUMN rich_size INTEGER NOT NULL DEFAULT 0")
         }
 
-        // 第二步：老表的 CHECK 约束只认 text / image，放不下 rich 记录。
-        // SQLite 不能原地改 CHECK，只能新建表 → 复制数据 → 换名
+        // 第二步：老表的 content_hash 带 UNIQUE（去重合并用的），还可能有 copy_count 列 → 整表搬迁。
+        // 新表每次复制都是独立的一条记录，不再合并、不计次数
         let currentSQL = try db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'clips'") {
             $0.text(0) ?? ""
         }.first ?? ""
-        guard !currentSQL.contains("'rich'") else { return }
-        try rebuildTable()
+        guard !currentSQL.contains("UNIQUE"), !currentSQL.contains("copy_count") else {
+            try rebuildTable()
+            return
+        }
     }
 
     /// 整表搬迁。全程在一个事务里：中途任何一步失败都整体回滚，老表原样保留
@@ -141,13 +137,12 @@ public final class ClipStore {
           image_w          INTEGER,           -- 仅图片非空
           image_h          INTEGER,           -- 仅图片非空
           preview          TEXT    NOT NULL,  -- 列表展示：文本前 2 行 / "图片 1920×1080" / "带格式内容 · 3 张图"
-          content_hash     TEXT    NOT NULL UNIQUE, -- SHA256(类型 + 原始字节)，去重依据
+          content_hash     TEXT    NOT NULL,  -- SHA256(类型 + 原始字节)，图片 / 格式副本的文件名；同样的内容有多条记录时共享文件
           byte_size        INTEGER NOT NULL CHECK (byte_size > 0), -- 文本字节数 / 图片文件大小 / 格式副本文件大小
           source_bundle_id TEXT,              -- NULL = 来源未知
           source_name      TEXT,              -- NULL = 来源未知
-          created_at       REAL    NOT NULL,  -- 首次记录时间（Unix 秒）
-          last_copied_at   REAL    NOT NULL,  -- 最近一次复制或选中输入的时间，"最近"页按它倒序
-          copy_count       INTEGER NOT NULL DEFAULT 1,
+          created_at       REAL    NOT NULL,  -- 记录时间（Unix 秒）
+          last_copied_at   REAL    NOT NULL,  -- 复制时间，"最近"页按它倒序；选中输入不会改它
           pinned_at        REAL,              -- NULL = 未收藏；非 NULL = 收藏时间，"收藏"页按它升序
           rich_file        TEXT,              -- NULL = 没有格式副本；否则数据目录下的相对路径 rich/<哈希>.plist
           rich_size        INTEGER NOT NULL DEFAULT 0, -- 格式副本文件大小；没有时为 0
@@ -163,26 +158,23 @@ public final class ClipStore {
 
     private static var schema: String { tableDDL(name: "clips") + "\n" + indexDDL }
 
-    /// 搬迁时要逐列复制，列名写全，避免依赖 SELECT * 的列顺序
+    /// 搬迁时要逐列复制，列名写全，避免依赖 SELECT * 的列顺序。
+    /// 老表多出来的 copy_count 直接丢弃
     private static let allColumns = """
         id, kind, text, image_file, image_w, image_h, preview, content_hash, byte_size, \
-        source_bundle_id, source_name, created_at, last_copied_at, copy_count, pinned_at, rich_file, rich_size
+        source_bundle_id, source_name, created_at, last_copied_at, pinned_at, rich_file, rich_size
         """
 
     // MARK: - 写入
 
-    /// 记录一条文本：已有同样内容时只更新时间和次数（并用这次的格式副本覆盖旧的），否则新增并执行保留清理。
-    /// 去重只认文本本身，格式副本是挂在记录上的附属，不参与 content_hash
+    /// 记录一条文本。同样的内容不去重：每次复制都是独立的一条，各自待在时间线自己的位置上。
+    /// 同样内容的记录共享同一个内容文件（按哈希命名），后复制的覆盖先复制的格式副本文件
     @discardableResult
-    public func recordText(_ text: String, rich: RichPayload? = nil, source: SourceApp?) throws -> RecordResult {
+    public func recordText(_ text: String, rich: RichPayload? = nil, source: SourceApp?) throws -> Int64 {
         let rich = Self.normalized(rich)
         return try queue.sync {
             let hash = Self.contentHash(kind: .text, bytes: Data(text.utf8))
             let timestamp = now().timeIntervalSince1970
-            if let id = try bumpIfExists(hash: hash, timestamp: timestamp) {
-                try replaceRich(id: id, hash: hash, rich: rich)
-                return .bumped(id: id)
-            }
             // 先写文件再写记录：中途崩溃最多留下孤儿文件（启动校验会清掉）
             let richSize = try rich.map { try payloads.save($0, hash: hash) } ?? 0
             do {
@@ -195,34 +187,27 @@ public final class ClipStore {
                         .optionalText(source?.bundleID), .optionalText(source?.name), .real(timestamp), .real(timestamp),
                     ])
             } catch {
-                payloads.delete(hash: hash)
+                try deleteFilesIfUnreferenced(hash: hash)
                 throw error
             }
             let id = db.lastInsertRowID
             try enforceRetention()
-            return .inserted(id: id)
+            return id
         }
     }
 
-    /// 记录一张图片（data 为剪贴板里的原始数据）
+    /// 记录一张图片（data 为剪贴板里的原始数据）。和文本一样不去重，每次复制都是独立的一条
     @discardableResult
     public func recordImage(
         _ data: Data, format: ImageFormat, width: Int, height: Int,
         rich: RichPayload? = nil, source: SourceApp?
-    ) throws -> RecordResult {
+    ) throws -> Int64 {
         let rich = Self.normalized(rich)
         return try queue.sync {
             let hash = Self.contentHash(kind: .image, bytes: data)
             let timestamp = now().timeIntervalSince1970
-            if let id = try bumpIfExists(hash: hash, timestamp: timestamp) {
-                // 图片文件意外丢失时补存，保证记录一定有对应的图
-                if !FileManager.default.fileExists(atPath: images.imageURL(hash: hash).path) {
-                    _ = try images.save(data: data, format: format, hash: hash)
-                }
-                try replaceRich(id: id, hash: hash, rich: rich)
-                return .bumped(id: id)
-            }
-            // 先写文件再写记录：中途崩溃最多留下孤儿文件（启动校验会清掉），不会出现记录指向不存在的图
+            // 先写文件再写记录：中途崩溃最多留下孤儿文件（启动校验会清掉），不会出现记录指向不存在的图。
+            // 同样内容的记录共享图片文件，重复保存只是原地覆盖
             let storedBytes = try images.save(data: data, format: format, hash: hash)
             let richSize = try rich.map { try payloads.save($0, hash: hash) } ?? 0
             do {
@@ -236,28 +221,23 @@ public final class ClipStore {
                         .optionalText(source?.bundleID), .optionalText(source?.name), .real(timestamp), .real(timestamp),
                     ])
             } catch {
-                images.delete(hash: hash)
-                payloads.delete(hash: hash)
+                try deleteFilesIfUnreferenced(hash: hash)
                 throw error
             }
             let id = db.lastInsertRowID
             try enforceRetention()
-            return .inserted(id: id)
+            return id
         }
     }
 
     /// 记录一条"正文就是格式副本"的内容（飞书表格里纯图片的单元格：剪贴板上没有图片数据，
-    /// 图片只以 <img src=…> 的形式存在于 HTML 里）。
+    /// 图片只以 <img src=…> 的形式存在于 HTML 里）。不去重，每次复制都是独立的一条。
     /// text 是复制当时那串纯文本（多半只是几个制表符），原样存下来，粘回去时一并写回
     @discardableResult
-    public func recordRich(_ payload: RichPayload, text: String?, source: SourceApp?) throws -> RecordResult {
+    public func recordRich(_ payload: RichPayload, text: String?, source: SourceApp?) throws -> Int64 {
         try queue.sync {
             let hash = Self.richContentHash(payload)
             let timestamp = now().timeIntervalSince1970
-            if let id = try bumpIfExists(hash: hash, timestamp: timestamp) {
-                try replaceRich(id: id, hash: hash, rich: payload)
-                return .bumped(id: id)
-            }
             // 先写文件再写记录：中途崩溃最多留下孤儿文件（启动校验会清掉）
             let richSize = try payloads.save(payload, hash: hash)
             do {
@@ -270,20 +250,12 @@ public final class ClipStore {
                         .optionalText(source?.bundleID), .optionalText(source?.name), .real(timestamp), .real(timestamp),
                     ])
             } catch {
-                payloads.delete(hash: hash)
+                try deleteFilesIfUnreferenced(hash: hash)
                 throw error
             }
             let id = db.lastInsertRowID
             try enforceRetention()
-            return .inserted(id: id)
-        }
-    }
-
-    /// 选中某条输入之后调用：更新时间（排到最前）并增加次数
-    public func markUsed(id: Int64) throws {
-        try queue.sync {
-            _ = try db.run("UPDATE clips SET last_copied_at = ?, copy_count = copy_count + 1 WHERE id = ?",
-                           [.real(now().timeIntervalSince1970), .integer(id)])
+            return id
         }
     }
 
@@ -299,15 +271,12 @@ public final class ClipStore {
     @discardableResult
     public func delete(id: Int64) throws -> Bool {
         try queue.sync {
-            let rows = try db.query("SELECT kind, content_hash, pinned_at FROM clips WHERE id = ?", [.integer(id)]) {
-                (kind: $0.text(0), hash: $0.text(1) ?? "", isPinned: !$0.isNull(2))
+            let rows = try db.query("SELECT content_hash, pinned_at FROM clips WHERE id = ?", [.integer(id)]) {
+                (hash: $0.text(0) ?? "", isPinned: !$0.isNull(1))
             }
             guard let row = rows.first, !row.isPinned else { return false }
             try db.run("DELETE FROM clips WHERE id = ?", [.integer(id)])
-            payloads.delete(hash: row.hash)
-            if row.kind == ClipKind.image.rawValue {
-                images.delete(hash: row.hash)
-            }
+            try deleteFilesIfUnreferenced(hash: row.hash)
             return true
         }
     }
@@ -340,6 +309,34 @@ public final class ClipStore {
             try db.query("SELECT \(Self.itemColumns) FROM clips WHERE pinned_at IS NOT NULL ORDER BY pinned_at ASC, id ASC",
                          map: Self.makeItem)
         }
+    }
+
+    /// 搜索：正文或摘要做子串匹配（LIKE 对 ASCII 不区分大小写）。
+    /// pinnedOnly = true 时只在收藏里找（按收藏顺序），否则搜全部（按复制时间倒序）
+    public func search(_ query: String, pinnedOnly: Bool, offset: Int = 0, limit: Int = Config.pageSize) throws -> [ClipItem] {
+        let pattern = "%" + Self.likeEscaped(query) + "%"
+        let arguments: [SQLValue] = [.text(pattern), .text(pattern), .integer(Int64(limit)), .integer(Int64(offset))]
+        return try queue.sync {
+            if pinnedOnly {
+                return try db.query("""
+                    SELECT \(Self.itemColumns) FROM clips
+                    WHERE pinned_at IS NOT NULL AND (text LIKE ? ESCAPE '\' OR preview LIKE ? ESCAPE '\')
+                    ORDER BY pinned_at ASC, id ASC LIMIT ? OFFSET ?
+                    """, arguments, map: Self.makeItem)
+            }
+            return try db.query("""
+                SELECT \(Self.itemColumns) FROM clips
+                WHERE text LIKE ? ESCAPE '\' OR preview LIKE ? ESCAPE '\'
+                ORDER BY last_copied_at DESC, id DESC LIMIT ? OFFSET ?
+                """, arguments, map: Self.makeItem)
+        }
+    }
+
+    /// LIKE 里的通配符（% 和 _）和转义符本身都要转义，按字面量匹配
+    private static func likeEscaped(_ query: String) -> String {
+        query.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
     }
 
     public func item(id: Int64) throws -> ClipItem? {
@@ -441,30 +438,9 @@ public final class ClipStore {
         rich == nil ? .null : .text(PayloadStore.relativePath(hash: hash))
     }
 
-    /// 命中已有记录时刷新格式副本：后一次复制覆盖前一次；这次没带格式就把旧的清掉
-    private func replaceRich(id: Int64, hash: String, rich: RichPayload?) throws {
-        guard let rich else {
-            try clearRich(id: id)
-            payloads.delete(hash: hash)
-            return
-        }
-        let size = try payloads.save(rich, hash: hash)
-        try db.run("UPDATE clips SET rich_file = ?, rich_size = ? WHERE id = ?",
-                   [.text(PayloadStore.relativePath(hash: hash)), .integer(Int64(size)), .integer(id)])
-    }
-
     /// 只解除记录对格式副本的引用，不动文件（文件由调用方决定删不删）
     private func clearRich(id: Int64) throws {
         try db.run("UPDATE clips SET rich_file = NULL, rich_size = 0 WHERE id = ?", [.integer(id)])
-    }
-
-    /// 已有同样内容：更新时间和次数，返回其 id；没有则返回 nil
-    private func bumpIfExists(hash: String, timestamp: Double) throws -> Int64? {
-        guard let id = try db.query("SELECT id FROM clips WHERE content_hash = ?", [.text(hash)], map: { $0.int(0) }).first else {
-            return nil
-        }
-        try db.run("UPDATE clips SET last_copied_at = ?, copy_count = copy_count + 1 WHERE id = ?", [.real(timestamp), .integer(id)])
-        return id
     }
 
     /// 保留策略：未收藏的超过条数上限删最旧的；未收藏图片总大小超过上限，从新到旧累加，超出部分删掉
@@ -509,13 +485,15 @@ public final class ClipStore {
                 victims.append(Victim(id: row.id, kind: row.kind, hash: row.hash))
             } else {
                 try clearRich(id: row.id)
-                payloads.delete(hash: row.hash)
+                // 同内容的其他记录可能还引用着同一个副本文件，没人引用才删
+                try deleteFilesIfUnreferenced(hash: row.hash)
             }
         }
         try deleteVictims(victims)
     }
 
-    /// 先删记录（事务）再删文件：中途崩溃只会留下孤儿文件，不会出现记录指向不存在的图
+    /// 先删记录（事务）再删文件：中途崩溃只会留下孤儿文件，不会出现记录指向不存在的图。
+    /// 同样内容的多条记录共享文件，所以删文件前要确认没有记录再引用这个哈希
     private func deleteVictims(_ victims: [Victim]) throws {
         guard !victims.isEmpty else { return }
         try db.transaction {
@@ -523,11 +501,25 @@ public final class ClipStore {
                 try db.run("DELETE FROM clips WHERE id = ?", [.integer(victim.id)])
             }
         }
-        for victim in victims {
-            payloads.delete(hash: victim.hash)
-            if victim.kind == ClipKind.image.rawValue {
-                images.delete(hash: victim.hash)
-            }
+        for hash in Set(victims.map(\.hash)) {
+            try deleteFilesIfUnreferenced(hash: hash)
+        }
+    }
+
+    /// 删掉没有任何记录引用的内容文件（原图 + 缩略图、格式副本）。
+    /// 同样的内容不再去重，多条记录会共享按哈希命名的文件，只有最后一条引用消失时才删
+    private func deleteFilesIfUnreferenced(hash: String) throws {
+        let imageRefs = try db.query(
+            "SELECT COUNT(*) FROM clips WHERE kind = 'image' AND content_hash = ?", [.text(hash)]
+        ) { Int($0.int(0)) }.first ?? 0
+        if imageRefs == 0 {
+            images.delete(hash: hash)
+        }
+        let richRefs = try db.query(
+            "SELECT COUNT(*) FROM clips WHERE rich_file = ?", [.text(PayloadStore.relativePath(hash: hash))]
+        ) { Int($0.int(0)) }.first ?? 0
+        if richRefs == 0 {
+            payloads.delete(hash: hash)
         }
     }
 
@@ -583,7 +575,7 @@ public final class ClipStore {
 
     private static let itemColumns = """
         id, kind, text, image_w, image_h, preview, content_hash, byte_size, \
-        source_bundle_id, source_name, created_at, last_copied_at, copy_count, pinned_at, \
+        source_bundle_id, source_name, created_at, last_copied_at, pinned_at, \
         rich_file, rich_size
         """
 
@@ -597,14 +589,13 @@ public final class ClipStore {
             preview: row.text(5) ?? "",
             contentHash: row.text(6) ?? "",
             byteSize: Int(row.int(7)),
-            hasRich: row.text(14) != nil,
-            richByteSize: Int(row.int(15)),
+            hasRich: row.text(13) != nil,
+            richByteSize: Int(row.int(14)),
             sourceBundleID: row.text(8),
             sourceName: row.text(9),
             createdAt: Date(timeIntervalSince1970: row.double(10)),
             lastCopiedAt: Date(timeIntervalSince1970: row.double(11)),
-            copyCount: Int(row.int(12)),
-            pinnedAt: row.optionalDouble(13).map { Date(timeIntervalSince1970: $0) }
+            pinnedAt: row.optionalDouble(12).map { Date(timeIntervalSince1970: $0) }
         )
     }
 }
