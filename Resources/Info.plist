@@ -15,9 +15,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>1.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_CN</string>
 	<!-- 系统返回的 App 名称等跟随用户语言（否则可能显示"Feishu"而不是"飞书"） -->
