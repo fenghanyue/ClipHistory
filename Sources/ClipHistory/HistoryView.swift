@@ -194,7 +194,9 @@ struct HistoryView: View {
                 }
             }
         }
-        .frame(width: PanelController.panelSize.width, height: PanelController.panelSize.height)
+        // 面板多大由窗口决定（用户可以拖拽调整），这里只声明下限，其余撑满
+        .frame(minWidth: PanelController.minimumSize.width, maxWidth: .infinity,
+               minHeight: PanelController.minimumSize.height, maxHeight: .infinity)
     }
 
     private var header: some View {
@@ -206,33 +208,27 @@ struct HistoryView: View {
                 model.switchTab(.pinned)
             }
             Spacer()
-            Button {
+            // 钉子 11pt（下移 0.5pt）、暂停 / 播放 12.5pt：按渲染出来的像素量过，两个图标的上沿、下沿才都对齐
+            HeaderIconButton(
+                systemName: model.keepOpen ? "pin.fill" : "pin", size: 11, offsetY: 0.5,
+                color: model.keepOpen ? Color.accentColor : Color.secondary,
+                help: model.keepOpen ? "取消悬浮：选中输入后关闭面板" : "一直悬浮：选中输入后面板不关闭，方便连续粘贴"
+            ) {
                 model.keepOpen.toggle()
-            } label: {
-                Image(systemName: model.keepOpen ? "pin.fill" : "pin")
-                    .font(.system(size: 12))
-                    .foregroundStyle(model.keepOpen ? Color.accentColor : Color.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .help(model.keepOpen ? "取消悬浮：选中输入后关闭面板" : "一直悬浮：选中输入后面板不关闭，方便连续粘贴")
-            Button {
+            // 按钮只用图标表示暂停状态（灰色暂停 → 橙色播放），说明文字在搜索框下面的提示条里
+            HeaderIconButton(
+                systemName: model.isPaused ? "play.circle.fill" : "pause.circle", size: 12.5, offsetY: 0,
+                color: model.isPaused ? Color.orange : Color.secondary,
+                help: model.isPaused ? "恢复记录" : "暂停记录"
+            ) {
                 model.togglePause()
-            } label: {
-                Label(model.isPaused ? "恢复记录" : "暂停记录",
-                      systemImage: model.isPaused ? "play.circle.fill" : "pause.circle")
-                    .font(.system(size: 12))
-                    .foregroundStyle(model.isPaused ? Color.orange : Color.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
+        // 面板没有标题栏：按住顶栏的空白处拖动，可以移动整个面板
+        .background(WindowDragArea())
     }
 
     /// 搜索框：面板一弹出就是焦点，直接打字过滤当前标签页的记录
@@ -361,6 +357,33 @@ struct TabButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// 顶栏右侧的图标按钮：固定 28×24 的点击区，图标在里面居中。
+/// 两个按钮共用同一个框，图标的右边缘才对得齐（与搜索框内容区对齐）。
+/// size 和 offsetY 要按渲染出来的像素调：钉子和圆圈的图形比例不同，同样字号下圆圈会矮一截，
+/// 得让两个图标的上沿、下沿都重合（也和标签文字的中心线一致）
+struct HeaderIconButton: View {
+    let systemName: String
+    let size: CGFloat
+    let offsetY: CGFloat
+    let color: Color
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: size))
+                .foregroundStyle(color)
+                .offset(y: offsetY)
+                .frame(width: 28, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 
@@ -520,7 +543,9 @@ struct SourceLine: View {
     }
 }
 
-/// 按原始比例缩放、不放大的缩略图
+/// 按原始比例缩放、不放大的缩略图。
+/// maxSize 是"最多能显示多大"：空间够就是这么大，空间不够（面板被拖窄了）就按比例继续缩小，
+/// 不能像固定宽度那样把右边的按钮挤出面板
 struct ImageThumbnail: View {
     let image: NSImage
     let item: ClipItem
@@ -532,7 +557,8 @@ struct ImageThumbnail: View {
         let scale = min(1, maxSize.width / width, maxSize.height / height)
         Image(nsImage: image)
             .resizable()
-            .frame(width: max(width * scale, 1), height: max(height * scale, 1))
+            .aspectRatio(width / height, contentMode: .fit)
+            .frame(maxWidth: max(width * scale, 1), maxHeight: max(height * scale, 1))
             .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }

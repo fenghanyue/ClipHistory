@@ -5,6 +5,24 @@ public enum PanelPlacement {
     /// 列表和鼠标之间的间距
     public static let gap: CGFloat = 8
 
+    /// 面板尺寸夹在"最小尺寸"和"屏幕可见区域"之间：在大显示器上调大的尺寸换到小屏幕上时，不会超出屏幕。
+    /// 屏幕比最小尺寸还小时以屏幕为准（宁可小一点，也要整个在屏幕里）
+    public static func clampedSize(_ size: CGSize, minimum: CGSize, visibleFrame: CGRect) -> CGSize {
+        CGSize(
+            width: min(max(size.width, minimum.width), visibleFrame.width),
+            height: min(max(size.height, minimum.height), visibleFrame.height)
+        )
+    }
+
+    /// 弹出时面板的位置和大小：大小用上次拖拽调整后保存的（从没调整过就用默认大小），
+    /// 夹在最小尺寸和这块屏幕之间，再按鼠标位置摆放
+    public static func frame(
+        mouse: CGPoint, savedSize: CGSize?, defaultSize: CGSize, minimumSize: CGSize, visibleFrame: CGRect
+    ) -> CGRect {
+        let size = clampedSize(savedSize ?? defaultSize, minimum: minimumSize, visibleFrame: visibleFrame)
+        return CGRect(origin: origin(mouse: mouse, size: size, visibleFrame: visibleFrame), size: size)
+    }
+
     /// - Parameters:
     ///   - mouse: 鼠标位置（屏幕坐标，原点在左下角）
     ///   - size: 列表尺寸

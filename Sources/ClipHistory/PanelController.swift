@@ -3,15 +3,17 @@ import Carbon.HIToolbox
 import ClipCore
 import SwiftUI
 
-/// 弹出列表的窗口：不激活本 App（输入框所在的 App 一直保持在前台），但能接收键盘操作
+/// 弹出列表的窗口：不激活本 App（输入框所在的 App 一直保持在前台），但能接收键盘操作；
+/// 拖拽四条边和四个角可以调整大小（无边框窗口要加上 .resizable 才有边缘可拖）
 final class HistoryPanel: NSPanel {
     init(size: NSSize) {
         super.init(
             contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: [.borderless, .nonactivatingPanel, .resizable],
             backing: .buffered,
             defer: false
         )
+        minSize = PanelController.minimumSize
         isFloatingPanel = true
         level = .popUpMenu
         // 在所有桌面空间、全屏 App 上都能弹出
@@ -27,13 +29,17 @@ final class HistoryPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// 管理弹出列表：显示位置、键盘操作、点外面关闭、选中后自动输入
+/// 管理弹出列表：显示位置和大小、键盘操作、点外面关闭、选中后自动输入
 final class PanelController: NSObject, NSWindowDelegate {
-    static let panelSize = NSSize(width: 400, height: 460)
+    /// 没调整过大小时的默认大小
+    static let defaultSize = NSSize(width: 400, height: 460)
+    /// 拖拽调整大小的下限：再小，顶栏和预览区就挤不下了
+    static let minimumSize = NSSize(width: 300, height: 320)
 
     private let store: ClipStore
     private let model: HistoryModel
-    private let panel = HistoryPanel(size: PanelController.panelSize)
+    private let sizeStore = PanelSizeStore()
+    private let panel = HistoryPanel(size: PanelController.defaultSize)
     private var keyMonitor: Any?
     private var clickMonitor: Any?
     /// 呼出列表前的前台 App：选中的内容要输入到它的输入框里
@@ -50,7 +56,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         super.init()
         panel.delegate = self
 
-        let background = NSVisualEffectView(frame: NSRect(origin: .zero, size: Self.panelSize))
+        let background = NSVisualEffectView(frame: NSRect(origin: .zero, size: Self.defaultSize))
         background.material = .popover
         background.blendingMode = .behindWindow
         // 本 App 不在前台时也保持正常外观（否则会变灰）
@@ -84,8 +90,12 @@ final class PanelController: NSObject, NSWindowDelegate {
 
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        let visibleFrame = screen?.visibleFrame ?? NSRect(origin: .zero, size: Self.panelSize)
-        panel.setFrameOrigin(PanelPlacement.origin(mouse: mouse, size: Self.panelSize, visibleFrame: visibleFrame))
+        let visibleFrame = screen?.visibleFrame ?? NSRect(origin: .zero, size: Self.defaultSize)
+        // 大小沿用上次拖拽调整的结果（没调整过就是默认大小），再按鼠标位置摆放
+        panel.setFrame(
+            PanelPlacement.frame(mouse: mouse, savedSize: sizeStore.load(), defaultSize: Self.defaultSize,
+                                 minimumSize: Self.minimumSize, visibleFrame: visibleFrame),
+            display: true)
         panel.makeKeyAndOrderFront(nil)
         panel.invalidateShadow()
         startMonitors()
@@ -101,6 +111,13 @@ final class PanelController: NSObject, NSWindowDelegate {
     func windowDidResignKey(_ notification: Notification) {
         guard !model.keepOpen else { return }
         close()
+    }
+
+    // 用户拖拽边缘调整完大小：记住，下次弹出沿用。只在用户拖拽结束时记：
+    // 弹出时为了适应屏幕而缩小的那一次不算，不然在小屏幕上用一次，就把大屏幕上调好的大小覆盖掉了
+    func windowDidEndLiveResize(_ notification: Notification) {
+        sizeStore.save(panel.frame.size)
+        panel.invalidateShadow()
     }
 
     // MARK: - 键盘与鼠标
