@@ -320,13 +320,13 @@ public final class ClipStore {
             if pinnedOnly {
                 return try db.query("""
                     SELECT \(Self.itemColumns) FROM clips
-                    WHERE pinned_at IS NOT NULL AND (text LIKE ? ESCAPE '\' OR preview LIKE ? ESCAPE '\')
+                    WHERE pinned_at IS NOT NULL AND (text LIKE ? ESCAPE '\\' OR preview LIKE ? ESCAPE '\\')
                     ORDER BY pinned_at ASC, id ASC LIMIT ? OFFSET ?
                     """, arguments, map: Self.makeItem)
             }
             return try db.query("""
                 SELECT \(Self.itemColumns) FROM clips
-                WHERE text LIKE ? ESCAPE '\' OR preview LIKE ? ESCAPE '\'
+                WHERE text LIKE ? ESCAPE '\\' OR preview LIKE ? ESCAPE '\\'
                 ORDER BY last_copied_at DESC, id DESC LIMIT ? OFFSET ?
                 """, arguments, map: Self.makeItem)
         }
