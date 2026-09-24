@@ -80,7 +80,8 @@ public enum CaptureFilter {
         let types = item.typeSet
         let hasImage = types.contains(PasteboardType.png) || types.contains(PasteboardType.tiff)
 
-        // 规则 3：本 App 写回剪贴板时带的来源标记 → 跳过（选中输入时已经更新过这条的时间）
+        // 规则 3：本 App 写回剪贴板时带的来源标记 → 跳过（选中输入不该产生新记录；
+        // 要不要把原条目顶到最上面由"粘贴后移到最上面"选项决定，在 PanelController 里做）
         if types.contains(PasteboardType.source),
            item.string(forType: PasteboardType.source) == Config.bundleID {
             return .skip(.ownWrite)

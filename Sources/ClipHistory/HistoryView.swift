@@ -122,6 +122,15 @@ final class HistoryModel: ObservableObject {
         isPaused = onTogglePause?() ?? isPaused
     }
 
+    /// 悬浮模式下粘贴后刷新列表（"粘贴后移到最上面"开着时用）：
+    /// 刚用过的条目可能已被顶到最上面，选中跟着它走
+    func reload(keepingSelectionOn itemID: Int64?) {
+        loadItems(atLeast: items.count)
+        if let itemID, let index = items.firstIndex(where: { $0.id == itemID }) {
+            selectedIndex = index
+        }
+    }
+
     /// 鼠标真的移动过才跟着悬停改变选中：键盘上下选择时列表会滚动，不能让静止的鼠标"抢"走选中
     func hover(index: Int) {
         let location = NSEvent.mouseLocation

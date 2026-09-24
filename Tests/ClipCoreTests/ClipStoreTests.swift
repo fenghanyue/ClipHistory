@@ -451,6 +451,18 @@ final class ClipStoreTests {
 
     // MARK: - 读取与持久化
 
+    @Test("粘贴后置顶：复制时间改成现在，条目顶到最上面，不新增记录")
+    func touchCopiedMovesToTop() throws {
+        let store = try makeStore()
+        let first = try store.recordText("A", source: nil)
+        try store.recordText("B", source: nil)
+
+        try store.touchCopied(id: first)
+
+        #expect(try store.recent().map(\.text) == ["A", "B"])
+        #expect(try store.counts().total == 2)
+    }
+
     @Test("分页读取")
     func paging() throws {
         let store = try makeStore()

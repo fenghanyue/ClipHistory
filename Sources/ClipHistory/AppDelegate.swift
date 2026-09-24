@@ -93,6 +93,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         menu.addItem(actionItem("显示剪贴板历史（⌥⌘V）", #selector(showPanel)))
         menu.addItem(actionItem(isPaused ? "▶ 恢复记录（当前已暂停）" : "暂停记录", #selector(togglePause)))
+        // 粘贴后是否把用过的条目顶到"最近"最上面；开着打勾，持久化到 UserDefaults
+        let moveToTop = actionItem("粘贴后把条目移到最上面", #selector(toggleMoveToTop))
+        moveToTop.state = UserDefaults.standard.bool(forKey: "pasteMovesToTop") ? .on : .off
+        menu.addItem(moveToTop)
         menu.addItem(.separator())
         if let counts = try? store?.counts() {
             menu.addItem(disabledItem("已记录 \(counts.total) 条（收藏 \(counts.pinned) 条）"))
@@ -130,6 +134,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.async { [weak self] in
             self?.panelController?.show()
         }
+    }
+
+    @objc private func toggleMoveToTop() {
+        let defaults = UserDefaults.standard
+        let enabled = !defaults.bool(forKey: "pasteMovesToTop")
+        defaults.set(enabled, forKey: "pasteMovesToTop")
+        DebugLog.write("粘贴后移到最上面：\(enabled ? "开" : "关")")
     }
 
     @objc private func togglePause() {

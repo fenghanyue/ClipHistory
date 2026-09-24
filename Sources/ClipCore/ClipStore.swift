@@ -142,7 +142,7 @@ public final class ClipStore {
           source_bundle_id TEXT,              -- NULL = 来源未知
           source_name      TEXT,              -- NULL = 来源未知
           created_at       REAL    NOT NULL,  -- 记录时间（Unix 秒）
-          last_copied_at   REAL    NOT NULL,  -- 复制时间，"最近"页按它倒序；选中输入不会改它
+          last_copied_at   REAL    NOT NULL,  -- 复制时间，"最近"页按它倒序；选中输入是否改它由"粘贴后移到最上面"选项决定
           pinned_at        REAL,              -- NULL = 未收藏；非 NULL = 收藏时间，"收藏"页按它升序
           rich_file        TEXT,              -- NULL = 没有格式副本；否则数据目录下的相对路径 rich/<哈希>.plist
           rich_size        INTEGER NOT NULL DEFAULT 0, -- 格式副本文件大小；没有时为 0
@@ -256,6 +256,15 @@ public final class ClipStore {
             let id = db.lastInsertRowID
             try enforceRetention()
             return id
+        }
+    }
+
+    /// 把一条记录的复制时间改成现在："最近"页按它倒序，所以这条会顶到最上面（不新增记录）。
+    /// 选中输入后是否调用由"粘贴后移到最上面"选项决定；收藏页按 pinned_at 排，不受影响
+    public func touchCopied(id: Int64) throws {
+        try queue.sync {
+            try db.run("UPDATE clips SET last_copied_at = ? WHERE id = ?",
+                       [.real(now().timeIntervalSince1970), .integer(id)])
         }
     }
 

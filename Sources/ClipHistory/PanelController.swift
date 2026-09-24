@@ -184,7 +184,19 @@ final class PanelController: NSObject, NSWindowDelegate {
             DebugLog.write("选中输入失败：条目 #\(item.id) 无法写入剪贴板（图片文件可能丢失）")
             return
         }
-        // 选中输入不改变历史记录：列表顺序只跟随真正的复制动作
+        // "粘贴后移到最上面"开着：把这条的复制时间改成现在，下次弹出排在第一；
+        // 关着则历史原样不动，列表顺序只跟随真正的复制动作
+        if UserDefaults.standard.bool(forKey: "pasteMovesToTop") {
+            do {
+                try store.touchCopied(id: item.id)
+                // 悬浮模式下面板不关：马上刷新，让这条显示在最上面
+                if model.keepOpen {
+                    model.reload(keepingSelectionOn: item.id)
+                }
+            } catch {
+                DebugLog.write("置顶条目 #\(item.id) 失败：\(error)")
+            }
+        }
 
         guard Paster.isTrusted else {
             Toast.show("已复制，按 ⌘V 粘贴（开启辅助功能后可自动输入）")
