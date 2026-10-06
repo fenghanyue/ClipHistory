@@ -122,15 +122,6 @@ final class HistoryModel: ObservableObject {
         isPaused = onTogglePause?() ?? isPaused
     }
 
-    /// 悬浮模式下粘贴后刷新列表（"粘贴后移到最上面"开着时用）：
-    /// 刚用过的条目可能已被顶到最上面，选中跟着它走
-    func reload(keepingSelectionOn itemID: Int64?) {
-        loadItems(atLeast: items.count)
-        if let itemID, let index = items.firstIndex(where: { $0.id == itemID }) {
-            selectedIndex = index
-        }
-    }
-
     /// 鼠标真的移动过才跟着悬停改变选中：键盘上下选择时列表会滚动，不能让静止的鼠标"抢"走选中
     func hover(index: Int) {
         let location = NSEvent.mouseLocation
@@ -415,7 +406,9 @@ struct HistoryRow: View {
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 4) {
                     content
-                    SourceLine(model: model, item: item, text: TimeText.describe(item.lastCopiedAt))
+                    // 显示真正的复制时间（和底部预览一致）：开了"粘贴后移到最上面"，
+                    // 排序用的 lastCopiedAt 会在粘贴时改成现在，显示它会像是刚从来源 App 复制的
+                    SourceLine(model: model, item: item, text: TimeText.describe(item.createdAt))
                 }
             }
             Spacer(minLength: 0)

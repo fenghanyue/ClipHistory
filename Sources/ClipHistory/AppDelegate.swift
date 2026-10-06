@@ -5,7 +5,7 @@ import ClipCore
 /// ClipHistory 自用版 1.0
 /// - 后台记录剪贴板历史（ClipboardWatcher → ClipStore），可暂停
 /// - ⌥⌘V 在鼠标旁弹出历史列表（最近 / 收藏），选中后自动输入（PanelController）
-/// - 菜单栏菜单：显示历史、暂停 / 恢复记录、开启自动输入、清空历史、退出
+/// - 菜单栏菜单：显示历史、暂停 / 恢复记录、粘贴后移到最上面、开启自动输入、清空历史、退出
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var hotKey: HotKey?
@@ -95,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(actionItem(isPaused ? "▶ 恢复记录（当前已暂停）" : "暂停记录", #selector(togglePause)))
         // 粘贴后是否把用过的条目顶到"最近"最上面；开着打勾，持久化到 UserDefaults
         let moveToTop = actionItem("粘贴后把条目移到最上面", #selector(toggleMoveToTop))
-        moveToTop.state = UserDefaults.standard.bool(forKey: "pasteMovesToTop") ? .on : .off
+        moveToTop.state = PanelController.pasteMovesToTop ? .on : .off
         menu.addItem(moveToTop)
         menu.addItem(.separator())
         if let counts = try? store?.counts() {
@@ -137,10 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleMoveToTop() {
-        let defaults = UserDefaults.standard
-        let enabled = !defaults.bool(forKey: "pasteMovesToTop")
-        defaults.set(enabled, forKey: "pasteMovesToTop")
-        DebugLog.write("粘贴后移到最上面：\(enabled ? "开" : "关")")
+        PanelController.pasteMovesToTop.toggle()
+        DebugLog.write("粘贴后移到最上面：\(PanelController.pasteMovesToTop ? "开" : "关")")
     }
 
     @objc private func togglePause() {

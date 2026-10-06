@@ -263,8 +263,8 @@ public final class ClipStore {
     /// 选中输入后是否调用由"粘贴后移到最上面"选项决定；收藏页按 pinned_at 排，不受影响
     public func touchCopied(id: Int64) throws {
         try queue.sync {
-            try db.run("UPDATE clips SET last_copied_at = ? WHERE id = ?",
-                       [.real(now().timeIntervalSince1970), .integer(id)])
+            _ = try db.run("UPDATE clips SET last_copied_at = ? WHERE id = ?",
+                           [.real(now().timeIntervalSince1970), .integer(id)])
         }
     }
 
