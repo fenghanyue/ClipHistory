@@ -36,6 +36,14 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// 拖拽调整大小的下限：再小，顶栏和预览区就挤不下了
     static let minimumSize = NSSize(width: 300, height: 320)
 
+    /// "粘贴后移到最上面"选项（菜单栏里开关，默认关）。设置名只写在这一处：
+    /// 各处手写的话拼错一处，开关就悄悄失效，编译器也查不出来
+    static var pasteMovesToTop: Bool {
+        get { UserDefaults.standard.bool(forKey: pasteMovesToTopKey) }
+        set { UserDefaults.standard.set(newValue, forKey: pasteMovesToTopKey) }
+    }
+    private static let pasteMovesToTopKey = "pasteMovesToTop"
+
     private let store: ClipStore
     private let model: HistoryModel
     private let sizeStore = PanelSizeStore()
@@ -184,7 +192,17 @@ final class PanelController: NSObject, NSWindowDelegate {
             DebugLog.write("选中输入失败：条目 #\(item.id) 无法写入剪贴板（图片文件可能丢失）")
             return
         }
-        // 选中输入不改变历史记录：列表顺序只跟随真正的复制动作
+        // "粘贴后移到最上面"开着：把这条的复制时间改成现在，下次弹出排在第一；
+        // 关着则历史原样不动，列表顺序只跟随真正的复制动作。
+        // 悬浮模式下开着的列表不马上重排（新复制的内容也不会实时出现在开着的列表里）：
+        // 立刻重排会滚回顶部，鼠标下面的条目也会换掉，打断连续粘贴
+        if Self.pasteMovesToTop {
+            do {
+                try store.touchCopied(id: item.id)
+            } catch {
+                DebugLog.write("置顶条目 #\(item.id) 失败：\(error)")
+            }
+        }
 
         guard Paster.isTrusted else {
             Toast.show("已复制，按 ⌘V 粘贴（开启辅助功能后可自动输入）")
